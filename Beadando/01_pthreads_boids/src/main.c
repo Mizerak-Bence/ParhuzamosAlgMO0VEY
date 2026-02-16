@@ -74,6 +74,10 @@ typedef struct AppState {
     UpdatePthreads updater;
     bool updaterInited;
 
+    int baseWorldW;
+    int baseWorldH;
+    float targetPixelsPerUnit;
+
     InputState input;
     bool quit;
 
@@ -86,6 +90,37 @@ typedef struct AppState {
     int backW;
     int backH;
 } AppState;
+
+static void app_update_world_bounds_for_window(AppState* s, HWND hwnd) {
+    if (!s || !hwnd) return;
+    if (s->targetPixelsPerUnit <= 0.5f) s->targetPixelsPerUnit = 10.0f;
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    if (cw <= 1 || ch <= 1) return;
+
+    const int hudH = 26;
+    int drawW = cw;
+    int drawH = (ch - hudH) > 1 ? (ch - hudH) : 1;
+
+    int desiredW = (int)((float)drawW / s->targetPixelsPerUnit);
+    int desiredH = (int)((float)drawH / s->targetPixelsPerUnit);
+    if (desiredW < s->baseWorldW) desiredW = s->baseWorldW;
+    if (desiredH < s->baseWorldH) desiredH = s->baseWorldH;
+    if (desiredW < 10) desiredW = 10;
+    if (desiredH < 10) desiredH = 10;
+
+    if (s->world.width != desiredW || s->world.height != desiredH) {
+        s->world.width = desiredW;
+        s->world.height = desiredH;
+        if (s->world.player.pos.x > (float)(s->world.width - 1)) s->world.player.pos.x = (float)(s->world.width - 1);
+        if (s->world.player.pos.y > (float)(s->world.height - 1)) s->world.player.pos.y = (float)(s->world.height - 1);
+        if (s->world.player.pos.x < 0) s->world.player.pos.x = 0;
+        if (s->world.player.pos.y < 0) s->world.player.pos.y = 0;
+    }
+}
 
 static void input_set_key(InputState* in, WPARAM vk, bool down) {
     if (vk == 'W') in->up = down;
@@ -139,6 +174,8 @@ static void draw_world_gdi(AppState* s, HWND hwnd) {
     int cw = rc.right - rc.left;
     int ch = rc.bottom - rc.top;
     if (!backbuffer_ensure(hwnd, s, cw, ch)) return;
+
+    app_update_world_bounds_for_window(s, hwnd);
 
     HBRUSH bg = (HBRUSH)GetStockObject(BLACK_BRUSH);
     FillRect(s->backDC, &rc, bg);
@@ -267,6 +304,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 RECT rc;
                 GetClientRect(hwnd, &rc);
                 backbuffer_ensure(hwnd, s, rc.right - rc.left, rc.bottom - rc.top);
+                app_update_world_bounds_for_window(s, hwnd);
             }
             return 0;
         }
@@ -331,6 +369,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     AppState st = {0};
     st.cfg = cfg;
+    st.baseWorldW = cfg.width;
+    st.baseWorldH = cfg.height;
+    st.targetPixelsPerUnit = 10.0f;
 
     if (!world_init(&st.world, cfg.width, cfg.height, (size_t)cfg.boidCount)) {
         fprintf(stderr, "world_init failed\n");
@@ -404,6 +445,7 @@ int main(int argc, char** argv) {
         acc += frameDt;
 
         while (acc >= simDt) {
+            app_update_world_bounds_for_window(&st, hwnd);
             world_apply_player_input(&st.world, &st.input, simDt);
 
             const uint64_t t0 = time_now_us();

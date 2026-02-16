@@ -63,30 +63,56 @@ bool world_init(World* w, int width, int height, size_t boidCount) {
         return false;
     }
 
-    const int groupCount = (boidCount >= 300) ? 6 : 5;
-    Vec2 centers[8];
-    Vec2 dirs[8];
+    int groupCount = 8;
+    if (boidCount < 180) groupCount = 7;
+    else if (boidCount < 320) groupCount = 9;
+    else if (boidCount < 520) groupCount = 11;
+    else groupCount = 13;
+    if (groupCount > 16) groupCount = 16;
+
+    Vec2 centers[16];
+    Vec2 dirs[16];
+    float weights[16];
+    float sumW = 0.0f;
+
     for (int g = 0; g < groupCount; g++) {
         centers[g] = (Vec2){
-            frand_range(0.15f * (float)(width - 1), 0.85f * (float)(width - 1)),
-            frand_range(0.15f * (float)(height - 1), 0.85f * (float)(height - 1)),
+            frand_range(0.12f * (float)(width - 1), 0.88f * (float)(width - 1)),
+            frand_range(0.12f * (float)(height - 1), 0.88f * (float)(height - 1)),
         };
         float a = frand_range(0.0f, 6.2831853f);
         dirs[g] = (Vec2){cosf(a), sinf(a)};
+
+        float w0 = 0.35f + frand01() * 1.25f;
+        if ((g % 4) == 0) w0 *= 1.8f;
+        if ((g % 5) == 0) w0 *= 0.7f;
+        weights[g] = w0;
+        sumW += w0;
     }
 
-    const float spreadX = (float)width * 0.08f;
-    const float spreadY = (float)height * 0.12f;
     const float baseSpeed = 14.0f;
 
     for (size_t i = 0; i < boidCount; i++) {
-        int g = (int)(i % (size_t)groupCount);
+        float r = frand01() * sumW;
+        int g = 0;
+        for (; g < groupCount; g++) {
+            r -= weights[g];
+            if (r <= 0.0f) break;
+        }
+        if (g >= groupCount) g = groupCount - 1;
+
+        float sizeFactor = weights[g] / (sumW / (float)groupCount);
+        if (sizeFactor < 0.6f) sizeFactor = 0.6f;
+        if (sizeFactor > 2.2f) sizeFactor = 2.2f;
+
+        float spreadX = (float)width * (0.03f + 0.04f * sizeFactor);
+        float spreadY = (float)height * (0.04f + 0.06f * sizeFactor);
         Vec2 p = v_add(centers[g], (Vec2){frand_signed() * spreadX, frand_signed() * spreadY});
         p = clamp_pos(w, p);
         w->boids[i].pos = p;
 
-        float sp = baseSpeed + frand_signed() * 4.0f;
-        Vec2 jitterDir = v_norm((Vec2){dirs[g].x + frand_signed() * 0.25f, dirs[g].y + frand_signed() * 0.25f});
+        float sp = baseSpeed + frand_signed() * (3.0f + 2.0f * sizeFactor);
+        Vec2 jitterDir = v_norm((Vec2){dirs[g].x + frand_signed() * 0.30f, dirs[g].y + frand_signed() * 0.30f});
         w->boids[i].vel = v_mul(jitterDir, sp);
     }
 
@@ -117,8 +143,20 @@ void world_apply_player_input(World* w, const InputState* in, double dt) {
 }
 
 void world_step_range(const World* r, World* w, size_t begin, size_t end, double dt) {
-    const float neighborRadius = 5.8f;
-    const float neighborRadius2 = neighborRadius * neighborRadius;
+    Vec2 centroid = {0, 0};
+    if (r->boidCount > 0) {
+        for (size_t k = 0; k < r->boidCount; k++) centroid = v_add(centroid, r->boids[k].pos);
+        centroid = v_mul(centroid, 1.0f / (float)r->boidCount);
+    }
+
+    const float worldW = (float)r->width;
+    const float worldH = (float)r->height;
+    const float diag = sqrtf(worldW * worldW + worldH * worldH);
+    const float detachDist = 0.22f * diag;
+    const float detachDist2 = detachDist * detachDist;
+
+    const float neighborRadiusCore = 5.8f;
+    const float neighborRadiusDetached = 7.2f;
     const float desiredSeparation = 2.2f;
     const float desiredSeparation2 = desiredSeparation * desiredSeparation;
 
@@ -136,6 +174,10 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
     for (size_t i = begin; i < end; i++) {
         Boid b = r->boids[i];
 
+        const bool detachedI = (v_len2(v_sub(b.pos, centroid)) > detachDist2);
+        const float neighborRadius = detachedI ? neighborRadiusDetached : neighborRadiusCore;
+        const float neighborRadius2 = neighborRadius * neighborRadius;
+
         Vec2 sumPos = {0, 0};
         Vec2 sumVel = {0, 0};
         Vec2 sumSep = {0, 0};
@@ -143,6 +185,10 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
 
         for (size_t j = 0; j < r->boidCount; j++) {
             if (i == j) continue;
+
+            const bool detachedJ = (v_len2(v_sub(r->boids[j].pos, centroid)) > detachDist2);
+            if (detachedJ != detachedI) continue;
+
             Vec2 diff = v_sub(r->boids[j].pos, b.pos);
             float d2 = v_len2(diff);
             if (d2 < neighborRadius2) {
@@ -174,6 +220,27 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
             accel = v_add(accel, v_mul(coh, wCohesion));
             accel = v_add(accel, v_mul(ali, wAlignment));
             accel = v_add(accel, v_mul(sep, wSeparation));
+        } else if (detachedI) {
+            const float seekRadius = 20.0f;
+            const float seekRadius2 = seekRadius * seekRadius;
+            float bestD2 = 1e30f;
+            size_t bestJ = (size_t)-1;
+            for (size_t j = 0; j < r->boidCount; j++) {
+                if (i == j) continue;
+                const bool detachedJ = (v_len2(v_sub(r->boids[j].pos, centroid)) > detachDist2);
+                if (!detachedJ) continue;
+                Vec2 diff = v_sub(r->boids[j].pos, b.pos);
+                float d2 = v_len2(diff);
+                if (d2 < seekRadius2 && d2 < bestD2) {
+                    bestD2 = d2;
+                    bestJ = j;
+                }
+            }
+            if (bestJ != (size_t)-1) {
+                Vec2 desired = v_mul(v_norm(v_sub(r->boids[bestJ].pos, b.pos)), maxSpeed);
+                Vec2 steer = steer_towards(desired, b.vel, maxForce);
+                accel = v_add(accel, v_mul(steer, 0.55f));
+            }
         }
 
         Vec2 toPlayer = v_sub(r->player.pos, b.pos);
