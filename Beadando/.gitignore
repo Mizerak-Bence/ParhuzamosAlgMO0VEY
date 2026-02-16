@@ -5,3 +5,9 @@
 01_pthreads_boids/boidc.txt
 01_pthreads_boids/mainc.txt
 01_pthreads_boids/update_pthread.txt
+
+# doxygen output (keep local)
+01_pthreads_boids/local_docs/
+
+# local doxygen config (keep local)
+01_pthreads_boids/Doxyfile
