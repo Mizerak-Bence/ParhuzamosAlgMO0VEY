@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=-O2 -std=c11 -Wall -Wextra -Wpedantic
-LDFLAGS=
+LDFLAGS=-lgdi32 -luser32
 
 SRC=$(wildcard src/*.c)
 OBJ=$(SRC:.c=.o)

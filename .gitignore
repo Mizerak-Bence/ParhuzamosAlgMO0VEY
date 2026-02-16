@@ -186,3 +186,6 @@ parallel/vizsga/msc/exercises/ea_4.yaml
 parallel/vizsga/msc/exercises/ea_5.yaml
 parallel/zv/zv_tetel_7_8_9.tex
 parallel/README.md
+Beadando/01_pthreads_boids/boidc.txt
+Beadando/01_pthreads_boids/mainc.txt
+Beadando/01_pthreads_boids/update_pthread.txt

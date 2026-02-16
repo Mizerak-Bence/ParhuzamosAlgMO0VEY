@@ -20,11 +20,6 @@ gcc -O2 -std=c11 -Wall -Wextra -Wpedantic -DWIN32_LEAN_AND_MEAN src\*.c -o boids
 
 Futtatás:
 ```powershell
-./boids_winapi.exe --threads 4 --boids 200 --seconds 10
-```
-
-Futtatás (indefinitely, amíg ki nem lépsz):
-```powershell
 ./boids_winapi.exe --threads 4 --boids 200
 ```
 Kilépés: `Q`

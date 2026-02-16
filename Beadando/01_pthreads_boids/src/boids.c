@@ -8,6 +8,14 @@ static float frand01(void) {
     return (float)rand() / (float)RAND_MAX;
 }
 
+static float frand_range(float a, float b) {
+    return a + (b - a) * frand01();
+}
+
+static float frand_signed(void) {
+    return frand01() * 2.0f - 1.0f;
+}
+
 static Vec2 v_add(Vec2 a, Vec2 b) { return (Vec2){a.x + b.x, a.y + b.y}; }
 static Vec2 v_sub(Vec2 a, Vec2 b) { return (Vec2){a.x - b.x, a.y - b.y}; }
 static Vec2 v_mul(Vec2 a, float k) { return (Vec2){a.x * k, a.y * k}; }
@@ -55,11 +63,31 @@ bool world_init(World* w, int width, int height, size_t boidCount) {
         return false;
     }
 
+    const int groupCount = (boidCount >= 300) ? 6 : 5;
+    Vec2 centers[8];
+    Vec2 dirs[8];
+    for (int g = 0; g < groupCount; g++) {
+        centers[g] = (Vec2){
+            frand_range(0.15f * (float)(width - 1), 0.85f * (float)(width - 1)),
+            frand_range(0.15f * (float)(height - 1), 0.85f * (float)(height - 1)),
+        };
+        float a = frand_range(0.0f, 6.2831853f);
+        dirs[g] = (Vec2){cosf(a), sinf(a)};
+    }
+
+    const float spreadX = (float)width * 0.08f;
+    const float spreadY = (float)height * 0.12f;
+    const float baseSpeed = 14.0f;
+
     for (size_t i = 0; i < boidCount; i++) {
-        w->boids[i].pos.x = frand01() * (float)(width - 1);
-        w->boids[i].pos.y = frand01() * (float)(height - 1);
-        w->boids[i].vel.x = (frand01() - 0.5f) * 10.0f;
-        w->boids[i].vel.y = (frand01() - 0.5f) * 10.0f;
+        int g = (int)(i % (size_t)groupCount);
+        Vec2 p = v_add(centers[g], (Vec2){frand_signed() * spreadX, frand_signed() * spreadY});
+        p = clamp_pos(w, p);
+        w->boids[i].pos = p;
+
+        float sp = baseSpeed + frand_signed() * 4.0f;
+        Vec2 jitterDir = v_norm((Vec2){dirs[g].x + frand_signed() * 0.25f, dirs[g].y + frand_signed() * 0.25f});
+        w->boids[i].vel = v_mul(jitterDir, sp);
     }
 
     w->player.pos = (Vec2){(float)(width / 2), (float)(height / 2)};
@@ -89,17 +117,17 @@ void world_apply_player_input(World* w, const InputState* in, double dt) {
 }
 
 void world_step_range(const World* r, World* w, size_t begin, size_t end, double dt) {
-    const float neighborRadius = 7.0f;
+    const float neighborRadius = 5.8f;
     const float neighborRadius2 = neighborRadius * neighborRadius;
-    const float desiredSeparation = 2.0f;
+    const float desiredSeparation = 2.2f;
     const float desiredSeparation2 = desiredSeparation * desiredSeparation;
 
     const float maxSpeed = 30.0f;
     const float maxForce = 25.0f;
 
-    const float wCohesion = 0.70f;
-    const float wAlignment = 0.90f;
-    const float wSeparation = 1.20f;
+    const float wCohesion = 0.45f;
+    const float wAlignment = 0.85f;
+    const float wSeparation = 1.45f;
     const float wAvoidPlayer = 1.50f;
     const float wWalls = 1.20f;
 

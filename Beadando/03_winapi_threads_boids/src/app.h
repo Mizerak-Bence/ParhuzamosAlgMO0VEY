@@ -8,7 +8,6 @@ typedef struct AppConfig {
     int boidCount;
     int threadCount;
     int stepsPerSecond;
-    int runSeconds;
 } AppConfig;
 
 bool app_run(const AppConfig* cfg);

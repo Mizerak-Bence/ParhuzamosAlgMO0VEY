@@ -7,7 +7,6 @@ typedef struct AppConfig {
     int width;
     int height;
     int threads;
-    int runSeconds;
 } AppConfig;
 
 typedef struct Life {

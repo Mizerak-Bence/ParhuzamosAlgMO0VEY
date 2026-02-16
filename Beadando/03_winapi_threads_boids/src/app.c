@@ -30,18 +30,10 @@ bool app_run(const AppConfig* cfg) {
 
     const double dt = 1.0 / (double)cfg->stepsPerSecond;
 
-    const uint64_t startUs = time_now_us();
-    const uint64_t maxRunUs = (cfg->runSeconds > 0) ? (uint64_t)cfg->runSeconds * 1000000ULL : 0ULL;
-
     double avgMs = 0.0;
     int frame = 0;
 
     while (true) {
-        if (maxRunUs > 0) {
-            uint64_t nowUs = time_now_us();
-            if (nowUs - startUs >= maxRunUs) break;
-        }
-
         InputState st = input_poll(&in);
         if (st.quit) break;
 

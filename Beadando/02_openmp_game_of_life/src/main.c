@@ -20,16 +20,14 @@ int main(int argc, char** argv) {
         .width = 80,
         .height = 25,
         .threads = 4,
-        .runSeconds = 0,
     };
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) cfg.width = parse_int(argv[++i], cfg.width);
         else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) cfg.height = parse_int(argv[++i], cfg.height);
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) cfg.threads = parse_int(argv[++i], cfg.threads);
-        else if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) cfg.runSeconds = parse_int(argv[++i], cfg.runSeconds);
         else if (strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [--width W] [--height H] [--threads N] [--seconds S]\n", argv[0]);
+            printf("Usage: %s [--width W] [--height H] [--threads N]\n", argv[0]);
             return 0;
         } else {
             fprintf(stderr, "Unknown arg: %s\n", argv[i]);
@@ -53,17 +51,9 @@ int main(int argc, char** argv) {
     int cursorY = cfg.height / 2;
     bool running = true;
 
-    const uint64_t startUs = time_now_us();
-    const uint64_t maxRunUs = (cfg.runSeconds > 0) ? (uint64_t)cfg.runSeconds * 1000000ULL : 0ULL;
-
     life_seed_glider(&life, cursorX, cursorY);
 
     while (true) {
-        if (maxRunUs > 0) {
-            uint64_t nowUs = time_now_us();
-            if (nowUs - startUs >= maxRunUs) break;
-        }
-
         InputState st = input_poll(&in);
         if (st.quit) break;
 

@@ -4,8 +4,9 @@
 Boids/flocking szimuláció párhuzamosítása POSIX `pthreads` használatával, és összevetés soros futással.
 
 ## Input
-- WASD: player mozgatása
-- Q: kilépés
+- WASD: player mozgatása (a megnyitott ablak legyen fókuszban)
+- Q vagy ESC: kilépés
+- Ablak bezárása (X): kilépés
 
 ## Build/Run (MinGW)
 - `make`
@@ -15,15 +16,10 @@ Boids/flocking szimuláció párhuzamosítása POSIX `pthreads` használatával,
 Fordítás:
 ```powershell
 cd "d:\Egyetem\2025_26_2\Párhuzamos algoritmusok\Beadando\01_pthreads_boids"
-gcc -O2 -std=c11 -Wall -Wextra -Wpedantic src\*.c -o boids_pthreads.exe -pthread
+gcc -O2 -std=c11 -Wall -Wextra -Wpedantic src\*.c -o boids_pthreads.exe -pthread -lgdi32 -luser32
 ```
 
 Futtatás (pthreads):
-```powershell
-./boids_pthreads.exe --mode pthread --threads 4 --boids 200 --seconds 10
-```
-
-Futtatás (indefinitely, amíg ki nem lépsz):
 ```powershell
 ./boids_pthreads.exe --mode pthread --threads 4 --boids 200
 ```
@@ -36,18 +32,13 @@ Start-Process cmd -ArgumentList '/k', 'cd /d "d:\Egyetem\2025_26_2\Párhuzamos a
 
 Futtatás (soros / baseline):
 ```powershell
-./boids_pthreads.exe --mode seq --threads 1 --boids 200 --seconds 10
-```
-
-Futtatás (soros, indefinitely):
-```powershell
 ./boids_pthreads.exe --mode seq --threads 1 --boids 200
 ```
 Kilépés: `Q`
 
 Megjegyzés: ha a `-pthread` nem működne a toolchain-ben, próbáld ezt:
 ```powershell
-gcc -O2 -std=c11 -Wall -Wextra -Wpedantic src\*.c -o boids_pthreads.exe -lwinpthread
+gcc -O2 -std=c11 -Wall -Wextra -Wpedantic src\*.c -o boids_pthreads.exe -lwinpthread -lgdi32 -luser32
 ```
 
 ## Mérési ötlet

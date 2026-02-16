@@ -1,15 +1,16 @@
 #include "boids.h"
 #include "update_pthreads.h"
 
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <conio.h>
 #endif
 
 typedef enum RunMode {
@@ -23,13 +24,11 @@ typedef struct AppConfig {
     int boidCount;
     int threadCount;
     RunMode mode;
-    int stepsPerSecond;
-    int runSeconds;
 } AppConfig;
 
 static void print_usage(const char* exe) {
-    printf("Usage: %s [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H] [--seconds S]\n", exe);
-    printf("Controls: WASD move player, Q quit\n");
+    printf("Usage: %s [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H]\n", exe);
+    printf("Controls (in window): WASD move player, Q or ESC quit\n");
 }
 
 static int parse_int(const char* s, int defaultValue) {
@@ -67,66 +66,226 @@ static void time_sleep_us(uint64_t us) {
 #endif
 }
 
-static void clear_screen(void) {
 #ifdef _WIN32
-    system("cls");
-#else
-    printf("\033[2J\033[H");
-#endif
+
+typedef struct AppState {
+    AppConfig cfg;
+    World world;
+    UpdatePthreads updater;
+    bool updaterInited;
+
+    InputState input;
+    bool quit;
+
+    double avgMs;
+    int avgCount;
+
+    HDC backDC;
+    HBITMAP backBmp;
+    HGDIOBJ backOld;
+    int backW;
+    int backH;
+} AppState;
+
+static void input_set_key(InputState* in, WPARAM vk, bool down) {
+    if (vk == 'W') in->up = down;
+    if (vk == 'S') in->down = down;
+    if (vk == 'A') in->left = down;
+    if (vk == 'D') in->right = down;
 }
 
-static bool poll_quit_and_input(InputState* outInput) {
-    InputState st = {0};
-    bool quit = false;
-
-#ifdef _WIN32
-    while (_kbhit()) {
-        int c = _getch();
-        if (c == 'q' || c == 'Q') quit = true;
-        if (c == 'w' || c == 'W') st.up = true;
-        if (c == 's' || c == 'S') st.down = true;
-        if (c == 'a' || c == 'A') st.left = true;
-        if (c == 'd' || c == 'D') st.right = true;
+static void backbuffer_destroy(AppState* s) {
+    if (!s) return;
+    if (s->backDC) {
+        if (s->backOld) SelectObject(s->backDC, s->backOld);
+        s->backOld = NULL;
     }
-#endif
-
-    *outInput = st;
-    return quit;
+    if (s->backBmp) {
+        DeleteObject(s->backBmp);
+        s->backBmp = NULL;
+    }
+    if (s->backDC) {
+        DeleteDC(s->backDC);
+        s->backDC = NULL;
+    }
+    s->backW = 0;
+    s->backH = 0;
 }
 
-static void render_world(const World* w, double avgMs, RunMode mode, int threads, char* frameBuf) {
-    clear_screen();
-    printf("Boids=%zu | mode=%s | threads=%d | avg=%.3f ms/tick\n",
-           w->boidCount,
-           mode == RUNMODE_SEQ ? "seq" : "pthread",
-           threads,
-           avgMs);
-    printf("Controls: WASD move player, Q quit\n\n");
+static bool backbuffer_ensure(HWND hwnd, AppState* s, int w, int h) {
+    if (w <= 0 || h <= 0) return false;
+    if (s->backDC && s->backBmp && s->backW == w && s->backH == h) return true;
 
-    const int width = w->width;
-    const int height = w->height;
-    const size_t n = (size_t)width * (size_t)height;
-    memset(frameBuf, ' ', n);
+    backbuffer_destroy(s);
 
-    for (size_t i = 0; i < w->boidCount; i++) {
-        int x = (int)(w->boids[i].pos.x + 0.5f);
-        int y = (int)(w->boids[i].pos.y + 0.5f);
-        if (x >= 0 && x < width && y >= 0 && y < height) {
-            frameBuf[(size_t)y * (size_t)width + (size_t)x] = 'o';
+    HDC dc = GetDC(hwnd);
+    if (!dc) return false;
+    s->backDC = CreateCompatibleDC(dc);
+    s->backBmp = CreateCompatibleBitmap(dc, w, h);
+    ReleaseDC(hwnd, dc);
+    if (!s->backDC || !s->backBmp) {
+        backbuffer_destroy(s);
+        return false;
+    }
+    s->backOld = SelectObject(s->backDC, s->backBmp);
+    s->backW = w;
+    s->backH = h;
+    return true;
+}
+
+static void draw_world_gdi(AppState* s, HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    if (!backbuffer_ensure(hwnd, s, cw, ch)) return;
+
+    HBRUSH bg = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    FillRect(s->backDC, &rc, bg);
+
+    const int hudH = 26;
+    const int drawW = cw;
+    const int drawH = (ch - hudH) > 1 ? (ch - hudH) : 1;
+    const float sx = (s->world.width > 0) ? ((float)drawW / (float)(s->world.width)) : 1.0f;
+    const float sy = (s->world.height > 0) ? ((float)drawH / (float)(s->world.height)) : 1.0f;
+    float scale = sx < sy ? sx : sy;
+    if (scale < 1.0f) scale = 1.0f;
+
+    SetBkMode(s->backDC, TRANSPARENT);
+    SetTextColor(s->backDC, RGB(220, 220, 220));
+
+    char hud[256];
+    _snprintf_s(hud, sizeof(hud), _TRUNCATE,
+                "Boids=%zu | mode=%s | threads=%d | avg=%.3f ms/tick | WASD move | Q/ESC quit",
+                s->world.boidCount,
+                s->cfg.mode == RUNMODE_SEQ ? "seq" : "pthread",
+                s->cfg.threadCount,
+                s->avgMs);
+    TextOutA(s->backDC, 6, 6, hud, (int)strlen(hud));
+
+    const float worldPixW = (float)s->world.width * scale;
+    const float worldPixH = (float)s->world.height * scale;
+    const float ox = 0.5f * ((float)drawW - worldPixW);
+    const float oy = (float)hudH + 0.5f * ((float)drawH - worldPixH);
+
+    HPEN penBoid = CreatePen(PS_SOLID, 1, RGB(200, 200, 255));
+    HBRUSH brBoid = CreateSolidBrush(RGB(80, 80, 220));
+    HPEN oldPen = (HPEN)SelectObject(s->backDC, penBoid);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(s->backDC, brBoid);
+
+    float triSize = 6.0f;
+    if (scale > 0.5f) triSize = 0.6f * scale;
+    if (triSize < 4.0f) triSize = 4.0f;
+    if (triSize > 14.0f) triSize = 14.0f;
+
+    for (size_t i = 0; i < s->world.boidCount; i++) {
+        const Boid* b = &s->world.boids[i];
+        float vx = b->vel.x;
+        float vy = b->vel.y;
+        float vl = sqrtf(vx * vx + vy * vy);
+        if (vl < 1e-4f) { vx = 1.0f; vy = 0.0f; vl = 1.0f; }
+        vx /= vl;
+        vy /= vl;
+        float px = ox + b->pos.x * scale;
+        float py = oy + b->pos.y * scale;
+        float hx = px + vx * triSize;
+        float hy = py + vy * triSize;
+        float pxp = -vy;
+        float pyp = vx;
+        float bx = px - vx * (triSize * 0.7f);
+        float by = py - vy * (triSize * 0.7f);
+        float lx = bx + pxp * (triSize * 0.6f);
+        float ly = by + pyp * (triSize * 0.6f);
+        float rx = bx - pxp * (triSize * 0.6f);
+        float ry = by - pyp * (triSize * 0.6f);
+        POINT pts[3];
+        pts[0] = (POINT){(LONG)(hx + 0.5f), (LONG)(hy + 0.5f)};
+        pts[1] = (POINT){(LONG)(lx + 0.5f), (LONG)(ly + 0.5f)};
+        pts[2] = (POINT){(LONG)(rx + 0.5f), (LONG)(ry + 0.5f)};
+        Polygon(s->backDC, pts, 3);
+    }
+
+    SelectObject(s->backDC, oldPen);
+    SelectObject(s->backDC, oldBrush);
+    DeleteObject(penBoid);
+    DeleteObject(brBoid);
+
+    HPEN penPlayer = CreatePen(PS_SOLID, 1, RGB(255, 180, 180));
+    HBRUSH brPlayer = CreateSolidBrush(RGB(220, 60, 60));
+    oldPen = (HPEN)SelectObject(s->backDC, penPlayer);
+    oldBrush = (HBRUSH)SelectObject(s->backDC, brPlayer);
+
+    float ppx = ox + s->world.player.pos.x * scale;
+    float ppy = oy + s->world.player.pos.y * scale;
+    int pr = (int)(triSize * 0.7f);
+    Ellipse(s->backDC, (int)(ppx - pr), (int)(ppy - pr), (int)(ppx + pr), (int)(ppy + pr));
+
+    SelectObject(s->backDC, oldPen);
+    SelectObject(s->backDC, oldBrush);
+    DeleteObject(penPlayer);
+    DeleteObject(brPlayer);
+}
+
+static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    AppState* s = (AppState*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_CREATE: {
+            CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+            return 0;
+        }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
+            if (s) {
+                input_set_key(&s->input, wParam, true);
+                if (wParam == VK_ESCAPE || wParam == 'Q') {
+                    s->quit = true;
+                    PostQuitMessage(0);
+                }
+            }
+            return 0;
+        }
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            if (s) input_set_key(&s->input, wParam, false);
+            return 0;
+        }
+        case WM_KILLFOCUS: {
+            if (s) s->input = (InputState){0};
+            return 0;
+        }
+        case WM_CLOSE: {
+            if (s) s->quit = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        case WM_SIZE: {
+            if (s) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                backbuffer_ensure(hwnd, s, rc.right - rc.left, rc.bottom - rc.top);
+            }
+            return 0;
+        }
+        case WM_PAINT: {
+            if (!s) break;
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            draw_world_gdi(s, hwnd);
+            if (s->backDC && s->backBmp) {
+                BitBlt(dc, 0, 0, s->backW, s->backH, s->backDC, 0, 0, SRCCOPY);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
         }
     }
-
-    int px = (int)(w->player.pos.x + 0.5f);
-    int py = (int)(w->player.pos.y + 0.5f);
-    if (px >= 0 && px < width && py >= 0 && py < height) {
-        frameBuf[(size_t)py * (size_t)width + (size_t)px] = '@';
-    }
-
-    for (int y = 0; y < height; y++) {
-        fwrite(&frameBuf[(size_t)y * (size_t)width], 1, (size_t)width, stdout);
-        fputc('\n', stdout);
-    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
 }
+
+#endif
 
 int main(int argc, char** argv) {
     AppConfig cfg = {
@@ -135,8 +294,6 @@ int main(int argc, char** argv) {
         .boidCount = 200,
         .threadCount = 4,
         .mode = RUNMODE_PTHREAD,
-        .stepsPerSecond = 30,
-        .runSeconds = 0,
     };
 
     for (int i = 1; i < argc; i++) {
@@ -158,83 +315,124 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--boids") == 0 && i + 1 < argc) { cfg.boidCount = parse_int(argv[++i], cfg.boidCount); continue; }
         if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) { cfg.width = parse_int(argv[++i], cfg.width); continue; }
         if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) { cfg.height = parse_int(argv[++i], cfg.height); continue; }
-        if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) { cfg.runSeconds = parse_int(argv[++i], cfg.runSeconds); continue; }
 
         fprintf(stderr, "Unknown arg: %s\n", argv[i]);
         print_usage(argv[0]);
         return 2;
     }
 
-    if (cfg.width <= 10 || cfg.height <= 10 || cfg.boidCount <= 0 || cfg.threadCount <= 0 || cfg.stepsPerSecond <= 0) {
+    if (cfg.width <= 10 || cfg.height <= 10 || cfg.boidCount <= 0 || cfg.threadCount <= 0) {
         fprintf(stderr, "Invalid config. Use --help\n");
         return 2;
     }
 
     srand((unsigned)time_now_us());
 
-    World world;
-    if (!world_init(&world, cfg.width, cfg.height, (size_t)cfg.boidCount)) {
+#ifdef _WIN32
+    AppState st = {0};
+    st.cfg = cfg;
+
+    if (!world_init(&st.world, cfg.width, cfg.height, (size_t)cfg.boidCount)) {
         fprintf(stderr, "world_init failed\n");
         return 1;
     }
 
-    UpdatePthreads updater = {0};
     if (cfg.mode == RUNMODE_PTHREAD) {
-        if (!update_pthreads_init(&updater, (size_t)cfg.threadCount)) {
+        if (!update_pthreads_init(&st.updater, (size_t)cfg.threadCount)) {
             fprintf(stderr, "update_pthreads_init failed\n");
-            world_destroy(&world);
+            world_destroy(&st.world);
             return 1;
         }
+        st.updaterInited = true;
     }
 
-    const double dt = 1.0 / (double)cfg.stepsPerSecond;
-    const uint64_t startUs = time_now_us();
-    const uint64_t maxRunUs = (cfg.runSeconds > 0) ? (uint64_t)cfg.runSeconds * 1000000ULL : 0ULL;
+    HINSTANCE inst = GetModuleHandle(NULL);
+    const char* cls = "BoidsPthreadsWindow";
 
-    char* frameBuf = (char*)malloc((size_t)cfg.width * (size_t)cfg.height);
-    if (!frameBuf) {
-        fprintf(stderr, "Out of memory\n");
-        if (cfg.mode == RUNMODE_PTHREAD) update_pthreads_destroy(&updater);
-        world_destroy(&world);
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = cls;
+    if (!RegisterClassA(&wc)) {
+        fprintf(stderr, "RegisterClass failed\n");
+        if (st.updaterInited) update_pthreads_destroy(&st.updater);
+        world_destroy(&st.world);
         return 1;
     }
 
-    double avgMs = 0.0;
-    int frameCount = 0;
+    const int scale = 10;
+    int clientW = cfg.width * scale;
+    int clientH = cfg.height * scale + 26;
+    RECT wr = {0, 0, clientW, clientH};
+    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
 
-    while (true) {
-        if (maxRunUs > 0) {
-            uint64_t nowUs = time_now_us();
-            if (nowUs - startUs >= maxRunUs) break;
-        }
+    HWND hwnd = CreateWindowExA(
+        0, cls, "Boids (pthreads)", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        wr.right - wr.left, wr.bottom - wr.top,
+        NULL, NULL, inst, &st);
 
-        InputState in;
-        if (poll_quit_and_input(&in)) break;
-
-        world_apply_player_input(&world, &in, dt);
-
-        const uint64_t t0 = time_now_us();
-        if (cfg.mode == RUNMODE_SEQ) {
-            world_step_range(&world, &world, 0, world.boidCount, dt);
-            world_swap_buffers(&world);
-        } else {
-            update_pthreads_step(&updater, &world, dt);
-        }
-        const uint64_t t1 = time_now_us();
-
-        const double ms = (double)(t1 - t0) / 1000.0;
-        frameCount++;
-        avgMs += (ms - avgMs) / (double)frameCount;
-
-        render_world(&world, avgMs, cfg.mode, cfg.threadCount, frameBuf);
-        time_sleep_us((uint64_t)(dt * 1000000.0));
+    if (!hwnd) {
+        fprintf(stderr, "CreateWindow failed\n");
+        if (st.updaterInited) update_pthreads_destroy(&st.updater);
+        world_destroy(&st.world);
+        return 1;
     }
 
-    free(frameBuf);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
 
-    if (cfg.mode == RUNMODE_PTHREAD) {
-        update_pthreads_destroy(&updater);
+    const double simDt = 1.0 / 120.0;
+    double acc = 0.0;
+    uint64_t lastUs = time_now_us();
+
+    MSG msg;
+    while (!st.quit) {
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { st.quit = true; break; }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        if (st.quit) break;
+
+        uint64_t nowUs = time_now_us();
+        double frameDt = (double)(nowUs - lastUs) / 1000000.0;
+        lastUs = nowUs;
+        if (frameDt > 0.05) frameDt = 0.05;
+        acc += frameDt;
+
+        while (acc >= simDt) {
+            world_apply_player_input(&st.world, &st.input, simDt);
+
+            const uint64_t t0 = time_now_us();
+            if (cfg.mode == RUNMODE_SEQ) {
+                world_step_range(&st.world, &st.world, 0, st.world.boidCount, simDt);
+                world_swap_buffers(&st.world);
+            } else {
+                update_pthreads_step(&st.updater, &st.world, simDt);
+            }
+            const uint64_t t1 = time_now_us();
+            const double ms = (double)(t1 - t0) / 1000.0;
+            st.avgCount++;
+            st.avgMs += (ms - st.avgMs) / (double)st.avgCount;
+
+            acc -= simDt;
+        }
+
+        InvalidateRect(hwnd, NULL, FALSE);
+        time_sleep_us(1000);
     }
-    world_destroy(&world);
+
+    backbuffer_destroy(&st);
+    if (st.updaterInited) update_pthreads_destroy(&st.updater);
+    world_destroy(&st.world);
     return 0;
+#else
+    (void)argc;
+    (void)argv;
+    fprintf(stderr, "This program requires Windows WinAPI for visualization.\n");
+    return 1;
+#endif
 }

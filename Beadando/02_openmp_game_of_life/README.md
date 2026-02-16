@@ -22,11 +22,6 @@ gcc -O2 -std=c11 -Wall -Wextra -Wpedantic src\*.c -o life_openmp.exe -fopenmp
 
 Futtatás:
 ```powershell
-./life_openmp.exe --threads 4 --width 80 --height 25 --seconds 10
-```
-
-Futtatás (indefinitely, amíg ki nem lépsz):
-```powershell
 ./life_openmp.exe --threads 4 --width 80 --height 25
 ```
 Kilépés: `Q`

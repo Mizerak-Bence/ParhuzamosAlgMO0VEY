@@ -22,7 +22,6 @@ int main(int argc, char** argv) {
         .boidCount = 200,
         .threadCount = 4,
         .stepsPerSecond = 30,
-        .runSeconds = 0,
     };
 
     for (int i = 1; i < argc; i++) {
@@ -34,7 +33,6 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--boids") == 0 && i + 1 < argc) cfg.boidCount = parse_int(argv[++i], cfg.boidCount);
         else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) cfg.width = parse_int(argv[++i], cfg.width);
         else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) cfg.height = parse_int(argv[++i], cfg.height);
-        else if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) cfg.runSeconds = parse_int(argv[++i], cfg.runSeconds);
         else {
             fprintf(stderr, "Unknown arg: %s\n", argv[i]);
             usage(argv[0]);
