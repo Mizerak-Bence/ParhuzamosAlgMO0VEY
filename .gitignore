@@ -189,3 +189,6 @@ parallel/README.md
 Beadando/01_pthreads_boids/boidc.txt
 Beadando/01_pthreads_boids/mainc.txt
 Beadando/01_pthreads_boids/update_pthread.txt
+
+# local VS Code tasks (keep local)
+.vscode/tasks.json
