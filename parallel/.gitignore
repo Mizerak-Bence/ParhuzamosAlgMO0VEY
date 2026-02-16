@@ -1,0 +1,6 @@
+gyakorlatok/_build/
+*.aux
+*.log
+*.out
+*.pdf
+*.synctex.gz
