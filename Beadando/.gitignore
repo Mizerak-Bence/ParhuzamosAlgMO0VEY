@@ -1,2 +1,7 @@
 *.o
 *.exe
+
+# local, non-submitted documentation (01_pthreads_boids)
+01_pthreads_boids/boidc.txt
+01_pthreads_boids/mainc.txt
+01_pthreads_boids/update_pthread.txt
