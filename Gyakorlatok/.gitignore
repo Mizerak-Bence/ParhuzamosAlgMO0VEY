@@ -1,0 +1,31 @@
+# Build outputs (C / MinGW / MSVC)
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+
+# Common Windows build/run artifacts
+*.pdb
+*.ilk
+*.exp
+*.map
+
+# Temporary / logs
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# VS Code
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
