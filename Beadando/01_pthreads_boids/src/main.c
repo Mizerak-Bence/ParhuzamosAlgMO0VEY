@@ -277,7 +277,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 input_set_key(&s->input, wParam, true);
                 if (wParam == VK_ESCAPE || wParam == 'Q') {
                     s->quit = true;
-                    PostQuitMessage(0);
+                    DestroyWindow(hwnd);
                 }
             }
             return 0;
@@ -450,7 +450,10 @@ int main(int argc, char** argv) {
 
             const uint64_t t0 = time_now_us();
             if (cfg.mode == RUNMODE_SEQ) {
-                world_step_range(&st.world, &st.world, 0, st.world.boidCount, simDt);
+                Vec2 centroid = world_compute_centroid(&st.world);
+                float detachDist2 = world_compute_detachDist2(&st.world);
+                world_compute_detached_range(&st.world, centroid, detachDist2, st.world.detached, 0, st.world.boidCount);
+                world_step_range(&st.world, &st.world, 0, st.world.boidCount, simDt, st.world.detached);
                 world_swap_buffers(&st.world);
             } else {
                 update_pthreads_step(&st.updater, &st.world, simDt);

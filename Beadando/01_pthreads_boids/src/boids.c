@@ -57,9 +57,11 @@ bool world_init(World* w, int width, int height, size_t boidCount) {
 
     w->boids = (Boid*)calloc(boidCount, sizeof(Boid));
     w->boidsNext = (Boid*)calloc(boidCount, sizeof(Boid));
-    if (!w->boids || !w->boidsNext) {
+    w->detached = (unsigned char*)calloc(boidCount, sizeof(unsigned char));
+    if (!w->boids || !w->boidsNext || !w->detached) {
         free(w->boids);
         free(w->boidsNext);
+        free(w->detached);
         return false;
     }
 
@@ -125,6 +127,7 @@ void world_destroy(World* w) {
     if (!w) return;
     free(w->boids);
     free(w->boidsNext);
+    free(w->detached);
     memset(w, 0, sizeof(*w));
 }
 
@@ -142,23 +145,47 @@ void world_apply_player_input(World* w, const InputState* in, double dt) {
     }
 }
 
-void world_step_range(const World* r, World* w, size_t begin, size_t end, double dt) {
+Vec2 world_compute_centroid(const World* w) {
     Vec2 centroid = {0, 0};
-    if (r->boidCount > 0) {
-        for (size_t k = 0; k < r->boidCount; k++) centroid = v_add(centroid, r->boids[k].pos);
-        centroid = v_mul(centroid, 1.0f / (float)r->boidCount);
+    if (w && w->boidCount > 0) {
+        for (size_t k = 0; k < w->boidCount; k++) {
+            centroid.x += w->boids[k].pos.x;
+            centroid.y += w->boids[k].pos.y;
+        }
+        centroid.x /= (float)w->boidCount;
+        centroid.y /= (float)w->boidCount;
     }
+    return centroid;
+}
 
-    const float worldW = (float)r->width;
-    const float worldH = (float)r->height;
+float world_compute_detachDist2(const World* w) {
+    const float worldW = (float)w->width;
+    const float worldH = (float)w->height;
     const float diag = sqrtf(worldW * worldW + worldH * worldH);
     const float detachDist = 0.22f * diag;
-    const float detachDist2 = detachDist * detachDist;
+    return detachDist * detachDist;
+}
+
+void world_compute_detached_range(const World* w, Vec2 centroid, float detachDist2, unsigned char* detached, size_t begin, size_t end) {
+    if (!w || !detached) return;
+    if (end > w->boidCount) end = w->boidCount;
+    for (size_t i = begin; i < end; i++) {
+        float dx = w->boids[i].pos.x - centroid.x;
+        float dy = w->boids[i].pos.y - centroid.y;
+        float d2 = dx * dx + dy * dy;
+        detached[i] = (d2 > detachDist2) ? 1u : 0u;
+    }
+}
+
+void world_step_range(const World* r, World* w, size_t begin, size_t end, double dt, const unsigned char* detached) {
 
     const float neighborRadiusCore = 5.8f;
     const float neighborRadiusDetached = 7.2f;
     const float desiredSeparation = 2.2f;
     const float desiredSeparation2 = desiredSeparation * desiredSeparation;
+
+    const float seekRadius = 20.0f;
+    const float seekRadius2 = seekRadius * seekRadius;
 
     const float maxSpeed = 30.0f;
     const float maxForce = 25.0f;
@@ -174,7 +201,7 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
     for (size_t i = begin; i < end; i++) {
         Boid b = r->boids[i];
 
-        const bool detachedI = (v_len2(v_sub(b.pos, centroid)) > detachDist2);
+        const bool detachedI = (detached && detached[i] != 0);
         const float neighborRadius = detachedI ? neighborRadiusDetached : neighborRadiusCore;
         const float neighborRadius2 = neighborRadius * neighborRadius;
 
@@ -183,14 +210,23 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
         Vec2 sumSep = {0, 0};
         int neighbors = 0;
 
+        float bestD2 = 1e30f;
+        size_t bestJ = (size_t)-1;
+
         for (size_t j = 0; j < r->boidCount; j++) {
             if (i == j) continue;
 
-            const bool detachedJ = (v_len2(v_sub(r->boids[j].pos, centroid)) > detachDist2);
+            const bool detachedJ = (detached && detached[j] != 0);
             if (detachedJ != detachedI) continue;
 
             Vec2 diff = v_sub(r->boids[j].pos, b.pos);
             float d2 = v_len2(diff);
+
+            if (detachedI && d2 < seekRadius2 && d2 < bestD2) {
+                bestD2 = d2;
+                bestJ = j;
+            }
+
             if (d2 < neighborRadius2) {
                 neighbors++;
                 sumPos = v_add(sumPos, r->boids[j].pos);
@@ -220,27 +256,10 @@ void world_step_range(const World* r, World* w, size_t begin, size_t end, double
             accel = v_add(accel, v_mul(coh, wCohesion));
             accel = v_add(accel, v_mul(ali, wAlignment));
             accel = v_add(accel, v_mul(sep, wSeparation));
-        } else if (detachedI) {
-            const float seekRadius = 20.0f;
-            const float seekRadius2 = seekRadius * seekRadius;
-            float bestD2 = 1e30f;
-            size_t bestJ = (size_t)-1;
-            for (size_t j = 0; j < r->boidCount; j++) {
-                if (i == j) continue;
-                const bool detachedJ = (v_len2(v_sub(r->boids[j].pos, centroid)) > detachDist2);
-                if (!detachedJ) continue;
-                Vec2 diff = v_sub(r->boids[j].pos, b.pos);
-                float d2 = v_len2(diff);
-                if (d2 < seekRadius2 && d2 < bestD2) {
-                    bestD2 = d2;
-                    bestJ = j;
-                }
-            }
-            if (bestJ != (size_t)-1) {
-                Vec2 desired = v_mul(v_norm(v_sub(r->boids[bestJ].pos, b.pos)), maxSpeed);
-                Vec2 steer = steer_towards(desired, b.vel, maxForce);
-                accel = v_add(accel, v_mul(steer, 0.55f));
-            }
+        } else if (detachedI && bestJ != (size_t)-1) {
+            Vec2 desired = v_mul(v_norm(v_sub(r->boids[bestJ].pos, b.pos)), maxSpeed);
+            Vec2 steer = steer_towards(desired, b.vel, maxForce);
+            accel = v_add(accel, v_mul(steer, 0.55f));
         }
 
         Vec2 toPlayer = v_sub(r->player.pos, b.pos);

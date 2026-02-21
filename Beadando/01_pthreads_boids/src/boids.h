@@ -24,6 +24,7 @@ typedef struct World {
     size_t boidCount;
     Boid* boids;
     Boid* boidsNext;
+    unsigned char* detached; /* 0/1 flags, recalculated each tick */
     Player player;
 } World;
 
@@ -39,6 +40,10 @@ void world_destroy(World* world);
 
 void world_apply_player_input(World* world, const InputState* input, double dt);
 
-void world_step_range(const World* worldRead, World* worldWrite, size_t begin, size_t end, double dt);
+Vec2 world_compute_centroid(const World* world);
+float world_compute_detachDist2(const World* world);
+void world_compute_detached_range(const World* world, Vec2 centroid, float detachDist2, unsigned char* detached, size_t begin, size_t end);
+
+void world_step_range(const World* worldRead, World* worldWrite, size_t begin, size_t end, double dt, const unsigned char* detached);
 
 void world_swap_buffers(World* world);

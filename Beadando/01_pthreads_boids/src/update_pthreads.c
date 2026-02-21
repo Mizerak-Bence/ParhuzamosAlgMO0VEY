@@ -17,13 +17,43 @@ typedef struct Impl {
     pthread_cond_t cvStart;
     pthread_cond_t cvDone;
 
+    pthread_mutex_t bm;
+    pthread_cond_t bcv;
+    size_t bcount;
+    size_t bgen;
+
     const World* worldRead;
     World* worldWrite;
     double dt;
+    Vec2 centroid;
+    float detachDist2;
+    unsigned char* detached;
     size_t finished;
     bool hasWork;
     bool stop;
 } Impl;
+
+static void barrier_wait(Impl* impl) {
+    pthread_mutex_lock(&impl->bm);
+    if (impl->stop) {
+        pthread_mutex_unlock(&impl->bm);
+        return;
+    }
+    size_t gen = impl->bgen;
+    impl->bcount++;
+    if (impl->bcount == impl->threadCount) {
+        impl->bcount = 0;
+        impl->bgen++;
+        pthread_cond_broadcast(&impl->bcv);
+        pthread_mutex_unlock(&impl->bm);
+        return;
+    }
+    while (gen == impl->bgen) {
+        pthread_cond_wait(&impl->bcv, &impl->bm);
+        if (impl->stop) break;
+    }
+    pthread_mutex_unlock(&impl->bm);
+}
 
 static void* worker_main(void* p) {
     WorkerCtx* ctx = (WorkerCtx*)p;
@@ -48,7 +78,10 @@ static void* worker_main(void* p) {
 
         size_t begin = (r->boidCount * id) / tc;
         size_t end = (r->boidCount * (id + 1)) / tc;
-        world_step_range(r, w, begin, end, dt);
+
+        world_compute_detached_range(r, impl->centroid, impl->detachDist2, impl->detached, begin, end);
+        barrier_wait(impl);
+        world_step_range(r, w, begin, end, dt, impl->detached);
 
         pthread_mutex_lock(&impl->m);
         impl->finished++;
@@ -80,6 +113,9 @@ bool update_pthreads_init(UpdatePthreads* u, size_t threadCount) {
     pthread_cond_init(&impl->cvStart, NULL);
     pthread_cond_init(&impl->cvDone, NULL);
 
+    pthread_mutex_init(&impl->bm, NULL);
+    pthread_cond_init(&impl->bcv, NULL);
+
     for (size_t i = 0; i < threadCount; i++) {
         impl->ctx[i] = (WorkerCtx){.id = i, .impl = impl};
         if (pthread_create(&impl->threads[i], NULL, worker_main, &impl->ctx[i]) != 0) {
@@ -110,6 +146,10 @@ void update_pthreads_destroy(UpdatePthreads* u) {
     pthread_cond_broadcast(&impl->cvStart);
     pthread_mutex_unlock(&impl->m);
 
+    pthread_mutex_lock(&impl->bm);
+    pthread_cond_broadcast(&impl->bcv);
+    pthread_mutex_unlock(&impl->bm);
+
     for (size_t i = 0; i < impl->threadCount; i++) {
         pthread_join(impl->threads[i], NULL);
     }
@@ -117,6 +157,9 @@ void update_pthreads_destroy(UpdatePthreads* u) {
     pthread_mutex_destroy(&impl->m);
     pthread_cond_destroy(&impl->cvStart);
     pthread_cond_destroy(&impl->cvDone);
+
+    pthread_mutex_destroy(&impl->bm);
+    pthread_cond_destroy(&impl->bcv);
 
     free(impl->threads);
     free(impl->ctx);
@@ -129,10 +172,16 @@ void update_pthreads_destroy(UpdatePthreads* u) {
 void update_pthreads_step(UpdatePthreads* u, World* w, double dt) {
     Impl* impl = (Impl*)u->impl;
 
+    Vec2 centroid = world_compute_centroid(w);
+    float detachDist2 = world_compute_detachDist2(w);
+
     pthread_mutex_lock(&impl->m);
     impl->worldRead = w;
     impl->worldWrite = w;
     impl->dt = dt;
+    impl->centroid = centroid;
+    impl->detachDist2 = detachDist2;
+    impl->detached = w->detached;
     impl->finished = 0;
     impl->hasWork = true;
     pthread_cond_broadcast(&impl->cvStart);
