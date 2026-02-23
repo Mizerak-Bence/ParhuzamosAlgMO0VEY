@@ -8,6 +8,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__has_include)
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#elif __has_include(<SDL.h>)
+#include <SDL.h>
+#else
+#error "SDL2 header not found. Install SDL2 dev package and set SDL2_CFLAGS in Makefile."
+#endif
+#else
+#include <SDL2/SDL.h>
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -40,33 +52,18 @@ static int parse_int(const char* s, int defaultValue) {
 }
 
 static uint64_t time_now_us(void) {
-#ifdef _WIN32
-    static LARGE_INTEGER freq;
-    static int init = 0;
-    if (!init) {
-        QueryPerformanceFrequency(&freq);
-        init = 1;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (uint64_t)((now.QuadPart * 1000000ULL) / (uint64_t)(freq.QuadPart));
-#else
-    return 0;
-#endif
+    const uint64_t c = (uint64_t)SDL_GetPerformanceCounter();
+    const uint64_t f = (uint64_t)SDL_GetPerformanceFrequency();
+    if (f == 0) return 0;
+    return (c * 1000000ULL) / f;
 }
 
 static void time_sleep_us(uint64_t us) {
-#ifdef _WIN32
     if (us == 0) return;
-    DWORD ms = (DWORD)(us / 1000ULL);
+    uint32_t ms = (uint32_t)(us / 1000ULL);
     if (ms == 0) ms = 1;
-    Sleep(ms);
-#else
-    (void)us;
-#endif
+    SDL_Delay(ms);
 }
-
-#ifdef _WIN32
 
 typedef struct AppState {
     AppConfig cfg;
@@ -84,26 +81,23 @@ typedef struct AppState {
     double avgMs;
     int avgCount;
 
-    HDC backDC;
-    HBITMAP backBmp;
-    HGDIOBJ backOld;
-    int backW;
-    int backH;
+    SDL_Window* window;
+    SDL_Renderer* renderer;
+    int winW;
+    int winH;
+    int titleCounter;
 } AppState;
 
-static void app_update_world_bounds_for_window(AppState* s, HWND hwnd) {
-    if (!s || !hwnd) return;
+static void app_update_world_bounds_for_window(AppState* s) {
+    if (!s || !s->window) return;
     if (s->targetPixelsPerUnit <= 0.5f) s->targetPixelsPerUnit = 10.0f;
 
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int cw = rc.right - rc.left;
-    int ch = rc.bottom - rc.top;
+    int cw = 0, ch = 0;
+    SDL_GetWindowSize(s->window, &cw, &ch);
     if (cw <= 1 || ch <= 1) return;
 
-    const int hudH = 26;
     int drawW = cw;
-    int drawH = (ch - hudH) > 1 ? (ch - hudH) : 1;
+    int drawH = ch;
 
     int desiredW = (int)((float)drawW / s->targetPixelsPerUnit);
     int desiredH = (int)((float)drawH / s->targetPixelsPerUnit);
@@ -122,99 +116,48 @@ static void app_update_world_bounds_for_window(AppState* s, HWND hwnd) {
     }
 }
 
-static void input_set_key(InputState* in, WPARAM vk, bool down) {
-    if (vk == 'W') in->up = down;
-    if (vk == 'S') in->down = down;
-    if (vk == 'A') in->left = down;
-    if (vk == 'D') in->right = down;
+static void input_set_key(InputState* in, SDL_Keycode key, bool down) {
+    if (key == SDLK_w) in->up = down;
+    if (key == SDLK_s) in->down = down;
+    if (key == SDLK_a) in->left = down;
+    if (key == SDLK_d) in->right = down;
 }
 
-static void backbuffer_destroy(AppState* s) {
-    if (!s) return;
-    if (s->backDC) {
-        if (s->backOld) SelectObject(s->backDC, s->backOld);
-        s->backOld = NULL;
+static void draw_filled_circle(SDL_Renderer* r, int cx, int cy, int radius) {
+    if (radius <= 0) return;
+    for (int y = -radius; y <= radius; y++) {
+        int x = (int)sqrtf((float)(radius * radius - y * y));
+        SDL_RenderDrawLine(r, cx - x, cy + y, cx + x, cy + y);
     }
-    if (s->backBmp) {
-        DeleteObject(s->backBmp);
-        s->backBmp = NULL;
-    }
-    if (s->backDC) {
-        DeleteDC(s->backDC);
-        s->backDC = NULL;
-    }
-    s->backW = 0;
-    s->backH = 0;
 }
 
-static bool backbuffer_ensure(HWND hwnd, AppState* s, int w, int h) {
-    if (w <= 0 || h <= 0) return false;
-    if (s->backDC && s->backBmp && s->backW == w && s->backH == h) return true;
+static void draw_world_sdl(AppState* s) {
+    if (!s || !s->renderer || !s->window) return;
 
-    backbuffer_destroy(s);
+    SDL_GetWindowSize(s->window, &s->winW, &s->winH);
+    app_update_world_bounds_for_window(s);
 
-    HDC dc = GetDC(hwnd);
-    if (!dc) return false;
-    s->backDC = CreateCompatibleDC(dc);
-    s->backBmp = CreateCompatibleBitmap(dc, w, h);
-    ReleaseDC(hwnd, dc);
-    if (!s->backDC || !s->backBmp) {
-        backbuffer_destroy(s);
-        return false;
-    }
-    s->backOld = SelectObject(s->backDC, s->backBmp);
-    s->backW = w;
-    s->backH = h;
-    return true;
-}
+    SDL_SetRenderDrawColor(s->renderer, 0, 0, 0, 255);
+    SDL_RenderClear(s->renderer);
 
-static void draw_world_gdi(AppState* s, HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int cw = rc.right - rc.left;
-    int ch = rc.bottom - rc.top;
-    if (!backbuffer_ensure(hwnd, s, cw, ch)) return;
-
-    app_update_world_bounds_for_window(s, hwnd);
-
-    HBRUSH bg = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    FillRect(s->backDC, &rc, bg);
-
-    const int hudH = 26;
-    const int drawW = cw;
-    const int drawH = (ch - hudH) > 1 ? (ch - hudH) : 1;
+    const int drawW = s->winW;
+    const int drawH = s->winH;
     const float sx = (s->world.width > 0) ? ((float)drawW / (float)(s->world.width)) : 1.0f;
     const float sy = (s->world.height > 0) ? ((float)drawH / (float)(s->world.height)) : 1.0f;
     float scale = sx < sy ? sx : sy;
     if (scale < 1.0f) scale = 1.0f;
 
-    SetBkMode(s->backDC, TRANSPARENT);
-    SetTextColor(s->backDC, RGB(220, 220, 220));
-
-    char hud[256];
-    _snprintf_s(hud, sizeof(hud), _TRUNCATE,
-                "Boids=%zu | mode=%s | threads=%d | avg=%.3f ms/tick | WASD move | Q/ESC quit",
-                s->world.boidCount,
-                s->cfg.mode == RUNMODE_SEQ ? "seq" : "pthread",
-                s->cfg.threadCount,
-                s->avgMs);
-    TextOutA(s->backDC, 6, 6, hud, (int)strlen(hud));
-
     const float worldPixW = (float)s->world.width * scale;
     const float worldPixH = (float)s->world.height * scale;
     const float ox = 0.5f * ((float)drawW - worldPixW);
-    const float oy = (float)hudH + 0.5f * ((float)drawH - worldPixH);
-
-    HPEN penBoid = CreatePen(PS_SOLID, 1, RGB(200, 200, 255));
-    HBRUSH brBoid = CreateSolidBrush(RGB(80, 80, 220));
-    HPEN oldPen = (HPEN)SelectObject(s->backDC, penBoid);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(s->backDC, brBoid);
+    const float oy = 0.5f * ((float)drawH - worldPixH);
 
     float triSize = 6.0f;
     if (scale > 0.5f) triSize = 0.6f * scale;
     if (triSize < 4.0f) triSize = 4.0f;
     if (triSize > 14.0f) triSize = 14.0f;
 
+    SDL_SetRenderDrawColor(s->renderer, 200, 200, 255, 255);
     for (size_t i = 0; i < s->world.boidCount; i++) {
         const Boid* b = &s->world.boids[i];
         float vx = b->vel.x;
@@ -223,6 +166,7 @@ static void draw_world_gdi(AppState* s, HWND hwnd) {
         if (vl < 1e-4f) { vx = 1.0f; vy = 0.0f; vl = 1.0f; }
         vx /= vl;
         vy /= vl;
+
         float px = ox + b->pos.x * scale;
         float py = oy + b->pos.y * scale;
         float hx = px + vx * triSize;
@@ -235,95 +179,37 @@ static void draw_world_gdi(AppState* s, HWND hwnd) {
         float ly = by + pyp * (triSize * 0.6f);
         float rx = bx - pxp * (triSize * 0.6f);
         float ry = by - pyp * (triSize * 0.6f);
-        POINT pts[3];
-        pts[0] = (POINT){(LONG)(hx + 0.5f), (LONG)(hy + 0.5f)};
-        pts[1] = (POINT){(LONG)(lx + 0.5f), (LONG)(ly + 0.5f)};
-        pts[2] = (POINT){(LONG)(rx + 0.5f), (LONG)(ry + 0.5f)};
-        Polygon(s->backDC, pts, 3);
+
+        SDL_Point pts[4];
+        pts[0] = (SDL_Point){(int)(hx + 0.5f), (int)(hy + 0.5f)};
+        pts[1] = (SDL_Point){(int)(lx + 0.5f), (int)(ly + 0.5f)};
+        pts[2] = (SDL_Point){(int)(rx + 0.5f), (int)(ry + 0.5f)};
+        pts[3] = pts[0];
+        SDL_RenderDrawLines(s->renderer, pts, 4);
     }
 
-    SelectObject(s->backDC, oldPen);
-    SelectObject(s->backDC, oldBrush);
-    DeleteObject(penBoid);
-    DeleteObject(brBoid);
-
-    HPEN penPlayer = CreatePen(PS_SOLID, 1, RGB(255, 180, 180));
-    HBRUSH brPlayer = CreateSolidBrush(RGB(220, 60, 60));
-    oldPen = (HPEN)SelectObject(s->backDC, penPlayer);
-    oldBrush = (HBRUSH)SelectObject(s->backDC, brPlayer);
-
-    float ppx = ox + s->world.player.pos.x * scale;
-    float ppy = oy + s->world.player.pos.y * scale;
+    SDL_SetRenderDrawColor(s->renderer, 220, 60, 60, 255);
+    int ppx = (int)(ox + s->world.player.pos.x * scale + 0.5f);
+    int ppy = (int)(oy + s->world.player.pos.y * scale + 0.5f);
     int pr = (int)(triSize * 0.7f);
-    Ellipse(s->backDC, (int)(ppx - pr), (int)(ppy - pr), (int)(ppx + pr), (int)(ppy + pr));
+    draw_filled_circle(s->renderer, ppx, ppy, pr);
 
-    SelectObject(s->backDC, oldPen);
-    SelectObject(s->backDC, oldBrush);
-    DeleteObject(penPlayer);
-    DeleteObject(brPlayer);
+    SDL_RenderPresent(s->renderer);
 }
 
-static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    AppState* s = (AppState*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-    switch (msg) {
-        case WM_CREATE: {
-            CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
-            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
-            return 0;
-        }
-        case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
-            if (s) {
-                input_set_key(&s->input, wParam, true);
-                if (wParam == VK_ESCAPE || wParam == 'Q') {
-                    s->quit = true;
-                    DestroyWindow(hwnd);
-                }
-            }
-            return 0;
-        }
-        case WM_KEYUP:
-        case WM_SYSKEYUP: {
-            if (s) input_set_key(&s->input, wParam, false);
-            return 0;
-        }
-        case WM_KILLFOCUS: {
-            if (s) s->input = (InputState){0};
-            return 0;
-        }
-        case WM_CLOSE: {
-            if (s) s->quit = true;
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-        case WM_SIZE: {
-            if (s) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                backbuffer_ensure(hwnd, s, rc.right - rc.left, rc.bottom - rc.top);
-                app_update_world_bounds_for_window(s, hwnd);
-            }
-            return 0;
-        }
-        case WM_PAINT: {
-            if (!s) break;
-            PAINTSTRUCT ps;
-            HDC dc = BeginPaint(hwnd, &ps);
-            draw_world_gdi(s, hwnd);
-            if (s->backDC && s->backBmp) {
-                BitBlt(dc, 0, 0, s->backW, s->backH, s->backDC, 0, 0, SRCCOPY);
-            }
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-    }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
+static void update_window_title(AppState* s) {
+    if (!s || !s->window) return;
+    if (++s->titleCounter < 12) return;
+    s->titleCounter = 0;
+    char title[256];
+    snprintf(title, sizeof(title),
+             "Boids=%zu | mode=%s | threads=%d | avg=%.3f ms/tick | WASD | Q/ESC quit",
+             s->world.boidCount,
+             s->cfg.mode == RUNMODE_SEQ ? "seq" : "pthread",
+             s->cfg.threadCount,
+             s->avgMs);
+    SDL_SetWindowTitle(s->window, title);
 }
-
-#endif
 
 int main(int argc, char** argv) {
     AppConfig cfg = {
@@ -364,9 +250,13 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
     srand((unsigned)time_now_us());
 
-#ifdef _WIN32
     AppState st = {0};
     st.cfg = cfg;
     st.baseWorldW = cfg.width;
@@ -387,54 +277,62 @@ int main(int argc, char** argv) {
         st.updaterInited = true;
     }
 
-    HINSTANCE inst = GetModuleHandle(NULL);
-    const char* cls = "BoidsPthreadsWindow";
-
-    WNDCLASSA wc = {0};
-    wc.lpfnWndProc = wndproc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    wc.lpszClassName = cls;
-    if (!RegisterClassA(&wc)) {
-        fprintf(stderr, "RegisterClass failed\n");
-        if (st.updaterInited) update_pthreads_destroy(&st.updater);
-        world_destroy(&st.world);
-        return 1;
-    }
-
     const int scale = 10;
-    int clientW = cfg.width * scale;
-    int clientH = cfg.height * scale + 26;
-    RECT wr = {0, 0, clientW, clientH};
-    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+    int winW = cfg.width * scale;
+    int winH = cfg.height * scale;
 
-    HWND hwnd = CreateWindowExA(
-        0, cls, "Boids (pthreads)", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        wr.right - wr.left, wr.bottom - wr.top,
-        NULL, NULL, inst, &st);
+    st.window = SDL_CreateWindow(
+        "Boids (SDL2)",
+        SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED,
+        winW,
+        winH,
+        SDL_WINDOW_RESIZABLE);
 
-    if (!hwnd) {
-        fprintf(stderr, "CreateWindow failed\n");
+    if (!st.window) {
+        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         if (st.updaterInited) update_pthreads_destroy(&st.updater);
         world_destroy(&st.world);
+        SDL_Quit();
         return 1;
     }
 
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+    st.renderer = SDL_CreateRenderer(st.window, -1, SDL_RENDERER_ACCELERATED);
+    if (!st.renderer) {
+        st.renderer = SDL_CreateRenderer(st.window, -1, SDL_RENDERER_SOFTWARE);
+    }
+    if (!st.renderer) {
+        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(st.window);
+        if (st.updaterInited) update_pthreads_destroy(&st.updater);
+        world_destroy(&st.world);
+        SDL_Quit();
+        return 1;
+    }
 
     const double simDt = 1.0 / 120.0;
     double acc = 0.0;
     uint64_t lastUs = time_now_us();
 
-    MSG msg;
     while (!st.quit) {
-        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) { st.quit = true; break; }
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) {
+                st.quit = true;
+                break;
+            }
+            if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
+                const bool down = (e.type == SDL_KEYDOWN);
+                SDL_Keycode key = e.key.keysym.sym;
+                input_set_key(&st.input, key, down);
+                if (down && (key == SDLK_ESCAPE || key == SDLK_q)) {
+                    st.quit = true;
+                    break;
+                }
+            }
+            if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                app_update_world_bounds_for_window(&st);
+            }
         }
         if (st.quit) break;
 
@@ -445,7 +343,7 @@ int main(int argc, char** argv) {
         acc += frameDt;
 
         while (acc >= simDt) {
-            app_update_world_bounds_for_window(&st, hwnd);
+            app_update_world_bounds_for_window(&st);
             world_apply_player_input(&st.world, &st.input, simDt);
 
             const uint64_t t0 = time_now_us();
@@ -466,18 +364,15 @@ int main(int argc, char** argv) {
             acc -= simDt;
         }
 
-        InvalidateRect(hwnd, NULL, FALSE);
+        update_window_title(&st);
+        draw_world_sdl(&st);
         time_sleep_us(1000);
     }
 
-    backbuffer_destroy(&st);
+    if (st.renderer) SDL_DestroyRenderer(st.renderer);
+    if (st.window) SDL_DestroyWindow(st.window);
     if (st.updaterInited) update_pthreads_destroy(&st.updater);
     world_destroy(&st.world);
+    SDL_Quit();
     return 0;
-#else
-    (void)argc;
-    (void)argv;
-    fprintf(stderr, "This program requires Windows WinAPI for visualization.\n");
-    return 1;
-#endif
 }
