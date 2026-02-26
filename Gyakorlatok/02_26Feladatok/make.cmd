@@ -1,0 +1,3 @@
+@echo off
+REM Convenience wrapper so you can type: make FILE=...
+mingw32-make %*
