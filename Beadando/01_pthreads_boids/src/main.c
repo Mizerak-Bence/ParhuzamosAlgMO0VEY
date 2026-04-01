@@ -30,6 +30,15 @@ typedef int SDL_Keycode;
 
 typedef struct SDL_Window SDL_Window;
 typedef struct SDL_Renderer SDL_Renderer;
+typedef struct SDL_Surface SDL_Surface;
+typedef struct SDL_Texture SDL_Texture;
+
+typedef struct SDL_Rect {
+    int x;
+    int y;
+    int w;
+    int h;
+} SDL_Rect;
 
 typedef struct SDL_Point {
     int x;
@@ -81,6 +90,7 @@ typedef struct SDL_Event {
 #define SDLK_1 '1'
 #define SDLK_2 '2'
 #define SDLK_3 '3'
+#define SDLK_TAB '\t'
 #define SDLK_SPACE ' '
 
 #define SDL_WINDOWPOS_CENTERED 0
@@ -101,6 +111,10 @@ SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
 void SDL_DestroyWindow(SDL_Window* window);
+SDL_Surface* SDL_LoadBMP(const char* file);
+void SDL_FreeSurface(SDL_Surface* surface);
+SDL_Texture* SDL_CreateTextureFromSurface(SDL_Renderer* renderer, SDL_Surface* surface);
+void SDL_DestroyTexture(SDL_Texture* texture);
 
 void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 int SDL_PollEvent(SDL_Event* event);
@@ -110,6 +124,7 @@ int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Ui
 int SDL_RenderClear(SDL_Renderer* renderer);
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);
 int SDL_RenderDrawLines(SDL_Renderer* renderer, const SDL_Point* points, int count);
+int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect* srcRect, const SDL_Rect* dstRect);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 
 #else
@@ -143,6 +158,74 @@ typedef struct AppConfig {
     int threadCount;
     RunMode mode;
 } AppConfig;
+
+typedef struct DropdownLayout {
+    int buttonX;
+    int buttonY;
+    int buttonW;
+    int buttonH;
+    int listX;
+    int listY;
+    int listW;
+    int listH;
+    int itemH;
+} DropdownLayout;
+
+typedef struct ViewTransform {
+    float scale;
+    float offsetX;
+    float offsetY;
+    float triSize;
+} ViewTransform;
+
+typedef struct ShockwaveSettings {
+    float radius;
+    float strength;
+} ShockwaveSettings;
+
+typedef struct StatsPanelLayout {
+    int x;
+    int y;
+    int w;
+    int h;
+} StatsPanelLayout;
+
+typedef struct AbilityBarLayout {
+    int x;
+    int y;
+    int w;
+    int h;
+    int slotSize;
+    int slotGap;
+    int slotCount;
+} AbilityBarLayout;
+
+typedef struct HealthBarLayout {
+    int x;
+    int y;
+    int w;
+    int h;
+} HealthBarLayout;
+
+typedef struct Glyph5x7 {
+    char ch;
+    uint8_t rows[7];
+} Glyph5x7;
+
+typedef struct UiAssets {
+    SDL_Texture* menuButtonClosed;
+    SDL_Texture* menuButtonOpen;
+    SDL_Texture* menuDropdownPanel;
+    SDL_Texture* hpBarEmpty;
+    SDL_Texture* hpBarFull;
+    SDL_Texture* hpHeartSheet;
+    int hpBarW;
+    int hpBarH;
+    int hpBarFillX;
+    int hpBarFillW;
+    int hpHeartFrames;
+    double hpHeartAnimTime;
+} UiAssets;
 
 static void print_usage(const char* exe) {
     printf("Usage: %s [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H]\n", exe);
@@ -191,6 +274,7 @@ typedef struct AppState {
 
     SDL_Window* window;
     SDL_Renderer* renderer;
+    UiAssets ui;
     int winW;
     int winH;
     int titleCounter;
@@ -203,7 +287,14 @@ typedef struct AppState {
     double shockTime;
     float shockRadius;
     int terminateKills;
+    double survivalTime;
+    bool showStatsPanel;
+    int playerHp;
+    int playerMaxHp;
+    double playerDamageCooldown;
 } AppState;
+
+static void set_group_color(SDL_Renderer* r, unsigned char group, int groupCount);
 
 static float torus_delta_f(float d, float size) {
     if (size <= 0.0f) return d;
@@ -244,70 +335,46 @@ static void draw_rect_filled(SDL_Renderer* r, int x, int y, int w, int h) {
     }
 }
 
-static const uint8_t* glyph_5x7(char c) {
-    /* Each row is 5 bits (MSB on the left), 7 rows total */
-    static const uint8_t SPACE[7] = {0, 0, 0, 0, 0, 0, 0};
-    static const uint8_t QMARK[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04};
-    static const uint8_t D0[7] = {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
-    static const uint8_t D1[7] = {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
-    static const uint8_t D2[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
-    static const uint8_t D3[7] = {0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E};
-    static const uint8_t D4[7] = {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
-    static const uint8_t D5[7] = {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E};
-    static const uint8_t D6[7] = {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E};
-    static const uint8_t D7[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
-    static const uint8_t D8[7] = {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
-    static const uint8_t D9[7] = {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C};
+static const Glyph5x7* find_glyph_5x7(char c) {
+    static const Glyph5x7 glyphs[] = {
+        {' ', {0, 0, 0, 0, 0, 0, 0}},
+        {'.', {0, 0, 0, 0, 0, 0x0C, 0x0C}},
+        {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+        {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+        {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+        {'3', {0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E}},
+        {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+        {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+        {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+        {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+        {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+        {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+        {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+        {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
+        {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
+        {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
+        {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+        {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
+        {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
+        {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+        {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
+        {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+        {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+        {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+        {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+        {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+        {'?', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}},
+    };
+    const size_t glyphCount = sizeof(glyphs) / sizeof(glyphs[0]);
 
-    static const uint8_t A[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
-    static const uint8_t C[7] = {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E};
-    static const uint8_t E[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
-    static const uint8_t F[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
-    static const uint8_t I[7] = {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E};
-    static const uint8_t L[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
-    static const uint8_t M[7] = {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
-    static const uint8_t N[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
-    static const uint8_t P[7] = {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
-    static const uint8_t R[7] = {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
-    static const uint8_t S[7] = {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
-    static const uint8_t T[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
-    static const uint8_t U[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
-    static const uint8_t V[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04};
-
-    if (c == ' ') return SPACE;
-    if (c >= '0' && c <= '9') {
-        switch (c) {
-        case '0': return D0;
-        case '1': return D1;
-        case '2': return D2;
-        case '3': return D3;
-        case '4': return D4;
-        case '5': return D5;
-        case '6': return D6;
-        case '7': return D7;
-        case '8': return D8;
-        case '9': return D9;
-        default: return QMARK;
-        }
-    }
     if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    switch (c) {
-    case 'A': return A;
-    case 'C': return C;
-    case 'E': return E;
-    case 'F': return F;
-    case 'I': return I;
-    case 'L': return L;
-    case 'M': return M;
-    case 'N': return N;
-    case 'P': return P;
-    case 'R': return R;
-    case 'S': return S;
-    case 'T': return T;
-    case 'U': return U;
-    case 'V': return V;
-    default: return QMARK;
+
+    for (size_t i = 0; i < glyphCount; i++) {
+        if (glyphs[i].ch == c) return &glyphs[i];
     }
+
+    return &glyphs[glyphCount - 1];
 }
 
 static void draw_text_5x7(SDL_Renderer* r, int x, int y, const char* text, int scale) {
@@ -315,9 +382,9 @@ static void draw_text_5x7(SDL_Renderer* r, int x, int y, const char* text, int s
     if (scale < 1) scale = 1;
     int cx = x;
     for (const char* p = text; *p; p++) {
-        const uint8_t* g = glyph_5x7(*p);
+        const Glyph5x7* g = find_glyph_5x7(*p);
         for (int row = 0; row < 7; row++) {
-            uint8_t bits = g[row];
+            uint8_t bits = g->rows[row];
             for (int col = 0; col < 5; col++) {
                 bool on = (bits & (1u << (4 - col))) != 0;
                 if (!on) continue;
@@ -369,69 +436,406 @@ static void draw_mode_icon(SDL_Renderer* r, int cx, int cy, GameMode mode) {
     }
 }
 
-static void get_mode_dropdown_rects(int* btnX, int* btnY, int* btnW, int* btnH, int* listX, int* listY, int* listW, int* listH, int* itemH) {
-    *btnX = 10;
-    *btnY = 10;
-    *btnW = 128;
-    *btnH = 26;
+static DropdownLayout get_mode_dropdown_layout(void) {
+    DropdownLayout layout;
+    layout.buttonX = 10;
+    layout.buttonY = 10;
+    layout.buttonW = 128;
+    layout.buttonH = 26;
+    layout.listX = layout.buttonX;
+    layout.listY = layout.buttonY + layout.buttonH + 6;
+    layout.listW = layout.buttonW;
+    layout.itemH = 24;
+    layout.listH = layout.itemH * 3;
+    return layout;
+}
 
-    *listX = *btnX;
-    *listY = *btnY + *btnH + 6;
-    *listW = *btnW;
-    *itemH = 24;
-    *listH = (*itemH) * 3;
+static StatsPanelLayout get_stats_panel_layout(int windowWidth) {
+    DropdownLayout dropdown = get_mode_dropdown_layout();
+    StatsPanelLayout layout;
+    layout.w = dropdown.buttonW;
+    layout.h = 58;
+    layout.x = windowWidth - layout.w - dropdown.buttonX;
+    layout.y = dropdown.buttonY;
+    return layout;
+}
+
+static HealthBarLayout get_health_bar_layout(int windowHeight) {
+    HealthBarLayout layout;
+    layout.w = 180;
+    layout.h = 56;
+    layout.x = 18;
+    layout.y = windowHeight - layout.h - 18;
+    return layout;
+}
+
+static AbilityBarLayout get_ability_bar_layout(int windowWidth, int windowHeight) {
+    AbilityBarLayout layout;
+    layout.slotSize = 38;
+    layout.slotGap = 8;
+    layout.slotCount = 4;
+    layout.w = layout.slotCount * layout.slotSize + (layout.slotCount - 1) * layout.slotGap + 20;
+    layout.h = layout.slotSize + 18;
+    layout.x = (windowWidth - layout.w) / 2;
+    layout.y = windowHeight - layout.h - 18;
+    return layout;
 }
 
 static bool pt_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && y >= ry && x < (rx + rw) && y < (ry + rh);
 }
 
-static void draw_mode_dropdown(SDL_Renderer* r, GameMode current, bool open) {
-    int bx, by, bw, bh, lx, ly, lw, lh, ih;
-    get_mode_dropdown_rects(&bx, &by, &bw, &bh, &lx, &ly, &lw, &lh, &ih);
+static void draw_mode_dropdown_fallback(SDL_Renderer* r, GameMode current, bool open) {
+    DropdownLayout layout = get_mode_dropdown_layout();
 
     SDL_SetRenderDrawColor(r, 40, 40, 40, 255);
-    draw_rect_filled(r, bx, by, bw, bh);
+    draw_rect_filled(r, layout.buttonX, layout.buttonY, layout.buttonW, layout.buttonH);
     SDL_SetRenderDrawColor(r, 200, 200, 200, 255);
-    draw_rect_outline(r, bx, by, bw, bh);
+    draw_rect_outline(r, layout.buttonX, layout.buttonY, layout.buttonW, layout.buttonH);
 
     mode_fill_color(r, current);
-    draw_rect_filled(r, bx + 4, by + 4, 18, bh - 8);
-    draw_mode_icon(r, bx + 13, by + bh / 2, current);
+    draw_rect_filled(r, layout.buttonX + 4, layout.buttonY + 4, 18, layout.buttonH - 8);
+    draw_mode_icon(r, layout.buttonX + 13, layout.buttonY + layout.buttonH / 2, current);
 
-    /* label in button */
     SDL_SetRenderDrawColor(r, 235, 235, 235, 255);
-    draw_text_5x7(r, bx + 28, by + 7, game_mode_label(current), 1);
+    draw_text_5x7(r, layout.buttonX + 28, layout.buttonY + 7, game_mode_label(current), 1);
 
     SDL_SetRenderDrawColor(r, 220, 220, 220, 255);
-    SDL_RenderDrawLine(r, bx + bw - 18, by + 10, bx + bw - 10, by + 10);
-    SDL_RenderDrawLine(r, bx + bw - 17, by + 11, bx + bw - 11, by + 11);
-    SDL_RenderDrawLine(r, bx + bw - 16, by + 12, bx + bw - 12, by + 12);
-    SDL_RenderDrawLine(r, bx + bw - 15, by + 13, bx + bw - 13, by + 13);
-    SDL_RenderDrawLine(r, bx + bw - 14, by + 14, bx + bw - 14, by + 14);
+    SDL_RenderDrawLine(r, layout.buttonX + layout.buttonW - 18, layout.buttonY + 10, layout.buttonX + layout.buttonW - 10, layout.buttonY + 10);
+    SDL_RenderDrawLine(r, layout.buttonX + layout.buttonW - 17, layout.buttonY + 11, layout.buttonX + layout.buttonW - 11, layout.buttonY + 11);
+    SDL_RenderDrawLine(r, layout.buttonX + layout.buttonW - 16, layout.buttonY + 12, layout.buttonX + layout.buttonW - 12, layout.buttonY + 12);
+    SDL_RenderDrawLine(r, layout.buttonX + layout.buttonW - 15, layout.buttonY + 13, layout.buttonX + layout.buttonW - 13, layout.buttonY + 13);
+    SDL_RenderDrawLine(r, layout.buttonX + layout.buttonW - 14, layout.buttonY + 14, layout.buttonX + layout.buttonW - 14, layout.buttonY + 14);
 
     if (!open) return;
 
     SDL_SetRenderDrawColor(r, 20, 20, 20, 255);
-    draw_rect_filled(r, lx, ly, lw, lh);
+    draw_rect_filled(r, layout.listX, layout.listY, layout.listW, layout.listH);
     SDL_SetRenderDrawColor(r, 200, 200, 200, 255);
-    draw_rect_outline(r, lx, ly, lw, lh);
+    draw_rect_outline(r, layout.listX, layout.listY, layout.listW, layout.listH);
 
     for (int i = 0; i < 3; i++) {
         GameMode m = (GameMode)i;
-        int y = ly + i * ih;
+        int y = layout.listY + i * layout.itemH;
         mode_fill_color(r, m);
-        draw_rect_filled(r, lx + 2, y + 2, 20, ih - 4);
-        draw_mode_icon(r, lx + 12, y + ih / 2, m);
+        draw_rect_filled(r, layout.listX + 2, y + 2, 20, layout.itemH - 4);
+        draw_mode_icon(r, layout.listX + 12, y + layout.itemH / 2, m);
 
         SDL_SetRenderDrawColor(r, 235, 235, 235, 255);
-        draw_text_5x7(r, lx + 28, y + 8, game_mode_label(m), 1);
+        draw_text_5x7(r, layout.listX + 28, y + 8, game_mode_label(m), 1);
 
         if (m == current) {
             SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-            draw_rect_outline(r, lx + 1, y + 1, lw - 2, ih - 2);
+            draw_rect_outline(r, layout.listX + 1, y + 1, layout.listW - 2, layout.itemH - 2);
         }
     }
+}
+
+static void draw_mode_dropdown(AppState* s) {
+    draw_mode_dropdown_fallback(s->renderer, s->gameMode, s->menuOpen);
+}
+
+static double survival_score_from_time(double survivalTime) {
+    return survivalTime / 10.0;
+}
+
+static float shock_cooldown_ratio(const AppState* s) {
+    const float maxCooldown = 1.0f;
+    float value = (float)(s->shockCooldown / (double)maxCooldown);
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+    return value;
+}
+
+static float player_hp_ratio(const AppState* s) {
+    if (s->playerMaxHp <= 0) return 0.0f;
+    if (s->playerHp <= 0) return 0.0f;
+    if (s->playerHp >= s->playerMaxHp) return 1.0f;
+    return (float)s->playerHp / (float)s->playerMaxHp;
+}
+
+static SDL_Texture* load_texture_from_bmp(SDL_Renderer* renderer, const char* path) {
+    SDL_Surface* surface;
+    SDL_Texture* texture;
+
+    surface = SDL_LoadBMP(path);
+    if (!surface) return NULL;
+
+    texture = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_FreeSurface(surface);
+    return texture;
+}
+
+static bool app_load_ui_assets(AppState* s) {
+    s->ui.hpBarEmpty = load_texture_from_bmp(s->renderer, "assets/ui/hp_bar_empty.bmp");
+    s->ui.hpBarFull = load_texture_from_bmp(s->renderer, "assets/ui/hp_bar_full.bmp");
+    s->ui.hpHeartSheet = load_texture_from_bmp(s->renderer, "assets/ui/hp_heart_sheet.bmp");
+    s->ui.hpBarW = 90;
+    s->ui.hpBarH = 28;
+    s->ui.hpBarFillX = 30;
+    s->ui.hpBarFillW = 54;
+    s->ui.hpHeartFrames = 2;
+    s->ui.hpHeartAnimTime = 0.0;
+
+    if (!s->ui.hpBarEmpty || !s->ui.hpBarFull || !s->ui.hpHeartSheet) {
+        if (s->ui.hpBarEmpty) SDL_DestroyTexture(s->ui.hpBarEmpty);
+        if (s->ui.hpBarFull) SDL_DestroyTexture(s->ui.hpBarFull);
+        if (s->ui.hpHeartSheet) SDL_DestroyTexture(s->ui.hpHeartSheet);
+        memset(&s->ui, 0, sizeof(s->ui));
+        return false;
+    }
+
+    return true;
+}
+
+static void app_destroy_ui_assets(AppState* s) {
+    if (s->ui.menuButtonClosed) SDL_DestroyTexture(s->ui.menuButtonClosed);
+    if (s->ui.menuButtonOpen) SDL_DestroyTexture(s->ui.menuButtonOpen);
+    if (s->ui.menuDropdownPanel) SDL_DestroyTexture(s->ui.menuDropdownPanel);
+    if (s->ui.hpBarEmpty) SDL_DestroyTexture(s->ui.hpBarEmpty);
+    if (s->ui.hpBarFull) SDL_DestroyTexture(s->ui.hpBarFull);
+    if (s->ui.hpHeartSheet) SDL_DestroyTexture(s->ui.hpHeartSheet);
+    memset(&s->ui, 0, sizeof(s->ui));
+}
+
+static void draw_survival_stats_panel(AppState* s) {
+    StatsPanelLayout layout;
+    char topValueText[32];
+    char scoreText[32];
+    const char* topLabel;
+
+    if (!s->showStatsPanel) return;
+    if (s->gameMode != GAMEMODE_SURVIVAL && s->gameMode != GAMEMODE_TERMINATE44) return;
+
+    layout = get_stats_panel_layout(s->winW);
+
+    SDL_SetRenderDrawColor(s->renderer, 40, 40, 40, 255);
+    draw_rect_filled(s->renderer, layout.x, layout.y, layout.w, layout.h);
+    SDL_SetRenderDrawColor(s->renderer, 200, 200, 200, 255);
+    draw_rect_outline(s->renderer, layout.x, layout.y, layout.w, layout.h);
+
+    SDL_SetRenderDrawColor(s->renderer, 235, 235, 235, 255);
+    topLabel = (s->gameMode == GAMEMODE_SURVIVAL) ? "TIME" : "KILL";
+    draw_text_5x7(s->renderer, layout.x + 8, layout.y + 8, topLabel, 1);
+    draw_text_5x7(s->renderer, layout.x + 8, layout.y + 32, "PTS", 1);
+
+    if (s->gameMode == GAMEMODE_SURVIVAL) {
+        snprintf(topValueText, sizeof(topValueText), "%.1f", s->survivalTime);
+        snprintf(scoreText, sizeof(scoreText), "%.1f", survival_score_from_time(s->survivalTime));
+    } else {
+        snprintf(topValueText, sizeof(topValueText), "%d", s->terminateKills);
+        snprintf(scoreText, sizeof(scoreText), "%d", s->terminateKills);
+    }
+
+    draw_text_5x7(s->renderer, layout.x + 58, layout.y + 8, topValueText, 1);
+    draw_text_5x7(s->renderer, layout.x + 58, layout.y + 32, scoreText, 1);
+}
+
+static void draw_health_bar_fallback(AppState* s) {
+    HealthBarLayout layout = get_health_bar_layout(s->winH);
+    int innerW = layout.w - 12;
+    int fillW = (int)(player_hp_ratio(s) * (float)innerW + 0.5f);
+
+    SDL_SetRenderDrawColor(s->renderer, 24, 24, 24, 255);
+    draw_rect_filled(s->renderer, layout.x, layout.y, layout.w, layout.h);
+    SDL_SetRenderDrawColor(s->renderer, 180, 180, 180, 255);
+    draw_rect_outline(s->renderer, layout.x, layout.y, layout.w, layout.h);
+    SDL_SetRenderDrawColor(s->renderer, 60, 0, 0, 255);
+    draw_rect_filled(s->renderer, layout.x + 6, layout.y + 6, innerW, layout.h / 2 - 6);
+    SDL_SetRenderDrawColor(s->renderer, 220, 70, 70, 255);
+    draw_rect_filled(s->renderer, layout.x + 6, layout.y + 6, fillW, layout.h / 2 - 6);
+    SDL_SetRenderDrawColor(s->renderer, 235, 235, 235, 255);
+    draw_text_5x7(s->renderer, layout.x + 8, layout.y + layout.h - 14, "HP", 1);
+}
+
+static void draw_health_bar(AppState* s) {
+    HealthBarLayout layout = get_health_bar_layout(s->winH);
+
+    if (!s->ui.hpBarEmpty || !s->ui.hpBarFull || !s->ui.hpHeartSheet) {
+        draw_health_bar_fallback(s);
+        return;
+    }
+
+    {
+        SDL_Rect dst = {layout.x, layout.y, layout.w, layout.h};
+        SDL_Rect srcEmpty = {0, 0, s->ui.hpBarW, s->ui.hpBarH};
+        int filledSourceWidth = (int)(player_hp_ratio(s) * (float)s->ui.hpBarFillW + 0.5f);
+        SDL_Rect srcFull = {s->ui.hpBarFillX, 0, filledSourceWidth, s->ui.hpBarH};
+        SDL_Rect dstFull = {layout.x + s->ui.hpBarFillX * 2, layout.y, filledSourceWidth * 2, layout.h};
+        int frameIndex = ((int)(s->ui.hpHeartAnimTime / 0.18)) % s->ui.hpHeartFrames;
+        SDL_Rect srcHeart = {frameIndex * s->ui.hpBarW, 0, s->ui.hpBarW, s->ui.hpBarH};
+
+        SDL_RenderCopy(s->renderer, s->ui.hpBarEmpty, &srcEmpty, &dst);
+        if (filledSourceWidth > 0) {
+            SDL_RenderCopy(s->renderer, s->ui.hpBarFull, &srcFull, &dstFull);
+        }
+        SDL_RenderCopy(s->renderer, s->ui.hpHeartSheet, &srcHeart, &dst);
+    }
+}
+
+static void draw_ability_bar(AppState* s) {
+    AbilityBarLayout layout;
+
+    layout = get_ability_bar_layout(s->winW, s->winH);
+
+    SDL_SetRenderDrawColor(s->renderer, 18, 18, 18, 255);
+    draw_rect_filled(s->renderer, layout.x, layout.y, layout.w, layout.h);
+    SDL_SetRenderDrawColor(s->renderer, 125, 125, 125, 255);
+    draw_rect_outline(s->renderer, layout.x, layout.y, layout.w, layout.h);
+
+    for (int i = 0; i < layout.slotCount; i++) {
+        int slotX = layout.x + 10 + i * (layout.slotSize + layout.slotGap);
+        int slotY = layout.y + 8;
+
+        SDL_SetRenderDrawColor(s->renderer, 38, 38, 38, 255);
+        draw_rect_filled(s->renderer, slotX, slotY, layout.slotSize, layout.slotSize);
+        SDL_SetRenderDrawColor(s->renderer, 110, 110, 110, 255);
+        draw_rect_outline(s->renderer, slotX, slotY, layout.slotSize, layout.slotSize);
+
+        if (i == 0) {
+            int innerX = slotX + 4;
+            int innerY = slotY + 4;
+            int innerW = layout.slotSize - 8;
+            int innerH = layout.slotSize - 8;
+            int barH;
+
+            SDL_SetRenderDrawColor(s->renderer, 45, 82, 120, 255);
+            draw_rect_filled(s->renderer, innerX, innerY, innerW, innerH);
+            SDL_SetRenderDrawColor(s->renderer, 150, 220, 255, 255);
+            SDL_RenderDrawLine(s->renderer, innerX + innerW / 2, innerY + 4, innerX + innerW / 2, innerY + innerH - 4);
+            SDL_RenderDrawLine(s->renderer, innerX + 4, innerY + innerH / 2, innerX + innerW - 4, innerY + innerH / 2);
+
+            if (s->shockCooldown > 0.0) {
+                barH = (int)(shock_cooldown_ratio(s) * (float)innerH + 0.5f);
+                SDL_SetRenderDrawColor(s->renderer, 8, 8, 8, 180);
+                draw_rect_filled(s->renderer, innerX, innerY, innerW, barH);
+            }
+
+            SDL_SetRenderDrawColor(s->renderer, 235, 235, 235, 255);
+            draw_text_5x7(s->renderer, slotX + 4, slotY + layout.slotSize - 10, "1", 1);
+        } else {
+            char slotLabel[2];
+            slotLabel[0] = (char)('1' + i);
+            slotLabel[1] = '\0';
+            SDL_SetRenderDrawColor(s->renderer, 120, 120, 120, 255);
+            draw_text_5x7(s->renderer, slotX + 14, slotY + 14, slotLabel, 1);
+        }
+    }
+
+    SDL_SetRenderDrawColor(s->renderer, 220, 220, 220, 255);
+    draw_text_5x7(s->renderer, layout.x + 14, layout.y + layout.h - 8, "SPACE", 1);
+}
+
+static ShockwaveSettings get_shockwave_settings(GameMode mode) {
+    ShockwaveSettings settings = {7.0f, 18.0f};
+    if (mode == GAMEMODE_SURVIVAL) {
+        settings.radius = 12.0f;
+        settings.strength = 26.0f;
+    } else if (mode == GAMEMODE_TERMINATE44) {
+        settings.radius = 10.0f;
+        settings.strength = 22.0f;
+    }
+    return settings;
+}
+
+static ViewTransform make_view_transform(const AppState* s) {
+    ViewTransform view = {1.0f, 0.0f, 0.0f, 6.0f};
+    const float sx = (s->world.width > 0) ? ((float)s->winW / (float)s->world.width) : 1.0f;
+    const float sy = (s->world.height > 0) ? ((float)s->winH / (float)s->world.height) : 1.0f;
+
+    view.scale = sx < sy ? sx : sy;
+    if (view.scale < 1.0f) view.scale = 1.0f;
+
+    {
+        const float worldPixW = (float)s->world.width * view.scale;
+        const float worldPixH = (float)s->world.height * view.scale;
+        view.offsetX = 0.5f * ((float)s->winW - worldPixW);
+        view.offsetY = 0.5f * ((float)s->winH - worldPixH);
+    }
+
+    if (view.scale > 0.5f) view.triSize = 0.6f * view.scale;
+    if (view.triSize < 4.0f) view.triSize = 4.0f;
+    if (view.triSize > 14.0f) view.triSize = 14.0f;
+    return view;
+}
+
+static Vec2 normalize_or_default(Vec2 v, Vec2 fallback) {
+    float len = sqrtf(v.x * v.x + v.y * v.y);
+    if (len < 1e-4f) return fallback;
+    return (Vec2){v.x / len, v.y / len};
+}
+
+static void draw_triangle_boid(SDL_Renderer* renderer, float px, float py, Vec2 dir, float size) {
+    Vec2 forward = normalize_or_default(dir, (Vec2){1.0f, 0.0f});
+    float sideX = -forward.y;
+    float sideY = forward.x;
+    float headX = px + forward.x * size;
+    float headY = py + forward.y * size;
+    float baseX = px - forward.x * (size * 0.7f);
+    float baseY = py - forward.y * (size * 0.7f);
+    float leftX = baseX + sideX * (size * 0.6f);
+    float leftY = baseY + sideY * (size * 0.6f);
+    float rightX = baseX - sideX * (size * 0.6f);
+    float rightY = baseY - sideY * (size * 0.6f);
+
+    SDL_Point pts[4];
+    pts[0] = (SDL_Point){(int)(headX + 0.5f), (int)(headY + 0.5f)};
+    pts[1] = (SDL_Point){(int)(leftX + 0.5f), (int)(leftY + 0.5f)};
+    pts[2] = (SDL_Point){(int)(rightX + 0.5f), (int)(rightY + 0.5f)};
+    pts[3] = pts[0];
+    SDL_RenderDrawLines(renderer, pts, 4);
+}
+
+static void draw_boids(AppState* s, const ViewTransform* view) {
+    for (size_t i = 0; i < s->world.boidCount; i++) {
+        const Boid* boid = &s->world.boids[i];
+        float size = view->triSize;
+        float px;
+        float py;
+
+        if (!boid->alive) continue;
+
+        if (boid->predator) {
+            SDL_SetRenderDrawColor(s->renderer, 255, 120, 0, 255);
+            size *= 1.8f;
+        } else {
+            set_group_color(s->renderer, boid->group, s->world.groupCount);
+        }
+
+        px = view->offsetX + boid->pos.x * view->scale;
+        py = view->offsetY + boid->pos.y * view->scale;
+        draw_triangle_boid(s->renderer, px, py, boid->vel, size);
+    }
+}
+
+static void draw_player(AppState* s, const ViewTransform* view) {
+    float px = view->offsetX + s->world.player.pos.x * view->scale;
+    float py = view->offsetY + s->world.player.pos.y * view->scale;
+    SDL_SetRenderDrawColor(s->renderer, 255, 255, 255, 255);
+    draw_triangle_boid(s->renderer, px, py, s->playerDir, view->triSize);
+}
+
+static void draw_shockwave_ring(AppState* s, const ViewTransform* view) {
+    enum { SHOCK_RING_SEGS = 24 };
+    SDL_Point pts[SHOCK_RING_SEGS + 1];
+    int cx;
+    int cy;
+    int rr;
+
+    if (s->shockTime <= 0.0 || s->shockRadius <= 0.0f) return;
+
+    SDL_SetRenderDrawColor(s->renderer, 120, 200, 255, 255);
+    cx = (int)(view->offsetX + s->world.player.pos.x * view->scale + 0.5f);
+    cy = (int)(view->offsetY + s->world.player.pos.y * view->scale + 0.5f);
+    rr = (int)(s->shockRadius * view->scale + 0.5f);
+
+    for (int i = 0; i <= SHOCK_RING_SEGS; i++) {
+        float angle = (float)i * (6.2831853f / (float)SHOCK_RING_SEGS);
+        pts[i].x = cx + (int)(cosf(angle) * (float)rr);
+        pts[i].y = cy + (int)(sinf(angle) * (float)rr);
+    }
+
+    SDL_RenderDrawLines(s->renderer, pts, SHOCK_RING_SEGS + 1);
 }
 
 static float frand01_local(void) {
@@ -457,8 +861,11 @@ static void app_reset_world_for_mode(AppState* s) {
     s->shockTime = 0.0;
     s->shockRadius = 0.0f;
     s->terminateKills = 0;
+    s->survivalTime = 0.0;
     s->shockRequest = false;
     s->playerDir = (Vec2){1.0f, 0.0f};
+    s->playerHp = s->playerMaxHp;
+    s->playerDamageCooldown = 0.0;
 
     if (s->gameMode == GAMEMODE_SURVIVAL) {
         int predCount = 6;
@@ -585,121 +992,293 @@ static void set_group_color(SDL_Renderer* r, unsigned char group, int groupCount
 }
 
 static void draw_world_sdl(AppState* s) {
+    ViewTransform view;
+
     if (!s || !s->renderer || !s->window) return;
 
     SDL_GetWindowSize(s->window, &s->winW, &s->winH);
     app_update_world_bounds_for_window(s);
+    view = make_view_transform(s);
 
     SDL_SetRenderDrawColor(s->renderer, 0, 0, 0, 255);
     SDL_RenderClear(s->renderer);
 
-    draw_mode_dropdown(s->renderer, s->gameMode, s->menuOpen);
+    draw_mode_dropdown(s);
+    draw_survival_stats_panel(s);
+    draw_health_bar(s);
 
-    const int drawW = s->winW;
-    const int drawH = s->winH;
-    const float sx = (s->world.width > 0) ? ((float)drawW / (float)(s->world.width)) : 1.0f;
-    const float sy = (s->world.height > 0) ? ((float)drawH / (float)(s->world.height)) : 1.0f;
-    float scale = sx < sy ? sx : sy;
-    if (scale < 1.0f) scale = 1.0f;
-
-    const float worldPixW = (float)s->world.width * scale;
-    const float worldPixH = (float)s->world.height * scale;
-    const float ox = 0.5f * ((float)drawW - worldPixW);
-    const float oy = 0.5f * ((float)drawH - worldPixH);
-
-    float triSize = 6.0f;
-    if (scale > 0.5f) triSize = 0.6f * scale;
-    if (triSize < 4.0f) triSize = 4.0f;
-    if (triSize > 14.0f) triSize = 14.0f;
-
-    for (size_t i = 0; i < s->world.boidCount; i++) {
-        const Boid* b = &s->world.boids[i];
-        if (!b->alive) continue;
-        float localTri = triSize;
-        if (b->predator) {
-            SDL_SetRenderDrawColor(s->renderer, 255, 120, 0, 255);
-            localTri = triSize * 1.8f;
-        } else {
-            set_group_color(s->renderer, b->group, s->world.groupCount);
-        }
-        float vx = b->vel.x;
-        float vy = b->vel.y;
-        float vl = sqrtf(vx * vx + vy * vy);
-        if (vl < 1e-4f) { vx = 1.0f; vy = 0.0f; vl = 1.0f; }
-        vx /= vl;
-        vy /= vl;
-
-        float px = ox + b->pos.x * scale;
-        float py = oy + b->pos.y * scale;
-        float hx = px + vx * localTri;
-        float hy = py + vy * localTri;
-        float pxp = -vy;
-        float pyp = vx;
-        float bx = px - vx * (localTri * 0.7f);
-        float by = py - vy * (localTri * 0.7f);
-        float lx = bx + pxp * (localTri * 0.6f);
-        float ly = by + pyp * (localTri * 0.6f);
-        float rx = bx - pxp * (localTri * 0.6f);
-        float ry = by - pyp * (localTri * 0.6f);
-
-        SDL_Point pts[4];
-        pts[0] = (SDL_Point){(int)(hx + 0.5f), (int)(hy + 0.5f)};
-        pts[1] = (SDL_Point){(int)(lx + 0.5f), (int)(ly + 0.5f)};
-        pts[2] = (SDL_Point){(int)(rx + 0.5f), (int)(ry + 0.5f)};
-        pts[3] = pts[0];
-        SDL_RenderDrawLines(s->renderer, pts, 4);
-    }
-
-    /* Player: fixed unique color */
-    SDL_SetRenderDrawColor(s->renderer, 255, 255, 255, 255);
-    {
-        Vec2 d = s->playerDir;
-        float vl = sqrtf(d.x * d.x + d.y * d.y);
-        if (vl < 1e-4f) {
-            d = (Vec2){1.0f, 0.0f};
-            vl = 1.0f;
-        }
-        float vx = d.x / vl;
-        float vy = d.y / vl;
-
-        float px = ox + s->world.player.pos.x * scale;
-        float py = oy + s->world.player.pos.y * scale;
-        float hx = px + vx * triSize;
-        float hy = py + vy * triSize;
-        float pxp = -vy;
-        float pyp = vx;
-        float bx = px - vx * (triSize * 0.7f);
-        float by = py - vy * (triSize * 0.7f);
-        float lx = bx + pxp * (triSize * 0.6f);
-        float ly = by + pyp * (triSize * 0.6f);
-        float rx = bx - pxp * (triSize * 0.6f);
-        float ry = by - pyp * (triSize * 0.6f);
-
-        SDL_Point pts[4];
-        pts[0] = (SDL_Point){(int)(hx + 0.5f), (int)(hy + 0.5f)};
-        pts[1] = (SDL_Point){(int)(lx + 0.5f), (int)(ly + 0.5f)};
-        pts[2] = (SDL_Point){(int)(rx + 0.5f), (int)(ry + 0.5f)};
-        pts[3] = pts[0];
-        SDL_RenderDrawLines(s->renderer, pts, 4);
-    }
-
-    /* shockwave ring for clear feedback */
-    if (s->shockTime > 0.0 && s->shockRadius > 0.0f) {
-        SDL_SetRenderDrawColor(s->renderer, 120, 200, 255, 255);
-        const int cx = (int)(ox + s->world.player.pos.x * scale + 0.5f);
-        const int cy = (int)(oy + s->world.player.pos.y * scale + 0.5f);
-        const int rr = (int)(s->shockRadius * scale + 0.5f);
-        enum { SHOCK_RING_SEGS = 24 };
-        SDL_Point pts[SHOCK_RING_SEGS + 1];
-        for (int i = 0; i <= SHOCK_RING_SEGS; i++) {
-            float a = (float)i * (6.2831853f / (float)SHOCK_RING_SEGS);
-            pts[i].x = cx + (int)(cosf(a) * (float)rr);
-            pts[i].y = cy + (int)(sinf(a) * (float)rr);
-        }
-        SDL_RenderDrawLines(s->renderer, pts, SHOCK_RING_SEGS + 1);
-    }
+    draw_boids(s, &view);
+    draw_player(s, &view);
+    draw_shockwave_ring(s, &view);
+    draw_ability_bar(s);
 
     SDL_RenderPresent(s->renderer);
+}
+
+static AppState app_make_initial_state(AppConfig cfg) {
+    AppState state;
+    memset(&state, 0, sizeof(state));
+    state.cfg = cfg;
+    state.baseWorldW = cfg.width;
+    state.baseWorldH = cfg.height;
+    state.targetPixelsPerUnit = 10.0f;
+    state.playerDir = (Vec2){1.0f, 0.0f};
+    state.gameMode = GAMEMODE_PEACEFUL;
+    state.pendingMode = state.gameMode;
+    state.showStatsPanel = true;
+    state.playerMaxHp = 10;
+    state.playerHp = state.playerMaxHp;
+    return state;
+}
+
+static bool app_create_world_and_updater(AppState* s) {
+    if (!world_init(&s->world, s->cfg.width, s->cfg.height, (size_t)s->cfg.boidCount)) {
+        fprintf(stderr, "world_init failed\n");
+        return false;
+    }
+
+    app_reset_world_for_mode(s);
+
+    if (s->cfg.mode == RUNMODE_PTHREAD) {
+        if (!update_pthreads_init(&s->updater, (size_t)s->cfg.threadCount)) {
+            fprintf(stderr, "update_pthreads_init failed\n");
+            world_destroy(&s->world);
+            return false;
+        }
+        s->updaterInited = true;
+    }
+
+    return true;
+}
+
+static bool app_create_window_and_renderer(AppState* s) {
+    const int scale = 10;
+    const int winW = s->cfg.width * scale;
+    const int winH = s->cfg.height * scale;
+
+    s->window = SDL_CreateWindow(
+        "Boids (SDL2)",
+        SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED,
+        winW,
+        winH,
+        SDL_WINDOW_RESIZABLE);
+
+    if (!s->window) {
+        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        return false;
+    }
+
+    s->renderer = SDL_CreateRenderer(s->window, -1, SDL_RENDERER_ACCELERATED);
+    if (!s->renderer) {
+        s->renderer = SDL_CreateRenderer(s->window, -1, SDL_RENDERER_SOFTWARE);
+    }
+    if (!s->renderer) {
+        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(s->window);
+        s->window = NULL;
+        return false;
+    }
+
+    (void)app_load_ui_assets(s);
+
+    return true;
+}
+
+static void app_destroy(AppState* s) {
+    app_destroy_ui_assets(s);
+    if (s->renderer) SDL_DestroyRenderer(s->renderer);
+    if (s->window) SDL_DestroyWindow(s->window);
+    if (s->updaterInited) update_pthreads_destroy(&s->updater);
+    world_destroy(&s->world);
+}
+
+static void app_handle_mouse_click(AppState* s, const SDL_MouseButtonEvent* button) {
+    DropdownLayout layout;
+    int index;
+
+    if (button->button != SDL_BUTTON_LEFT) return;
+
+    layout = get_mode_dropdown_layout();
+    if (pt_in_rect(button->x, button->y, layout.buttonX, layout.buttonY, layout.buttonW, layout.buttonH)) {
+        s->menuOpen = !s->menuOpen;
+        return;
+    }
+
+    if (s->menuOpen && pt_in_rect(button->x, button->y, layout.listX, layout.listY, layout.listW, layout.listH)) {
+        index = (button->y - layout.listY) / layout.itemH;
+        if (index < 0) index = 0;
+        if (index > 2) index = 2;
+        s->pendingMode = (GameMode)index;
+        s->pendingModeChange = true;
+    }
+
+    s->menuOpen = false;
+}
+
+static void app_handle_key(AppState* s, SDL_Keycode key, bool down) {
+    input_set_key(&s->input, key, down);
+
+    if (!down) return;
+
+    if (key == SDLK_TAB) {
+        s->showStatsPanel = !s->showStatsPanel;
+        return;
+    }
+
+    if (key == SDLK_SPACE || key == ' ') {
+        s->shockRequest = true;
+    }
+
+    if (key == SDLK_ESCAPE || key == SDLK_q) {
+        s->quit = true;
+    }
+}
+
+static void app_handle_event(AppState* s, const SDL_Event* e) {
+    if (e->type == SDL_QUIT) {
+        s->quit = true;
+    } else if (e->type == SDL_MOUSEBUTTONDOWN) {
+        app_handle_mouse_click(s, &e->button);
+    } else if (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP) {
+        app_handle_key(s, e->key.keysym.sym, e->type == SDL_KEYDOWN);
+    } else if (e->type == SDL_WINDOWEVENT && e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+        app_update_world_bounds_for_window(s);
+    }
+}
+
+static void app_poll_events(AppState* s) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        app_handle_event(s, &e);
+        if (s->quit) break;
+    }
+}
+
+static void app_apply_pending_mode_change(AppState* s) {
+    if (!s->pendingModeChange) return;
+    s->pendingModeChange = false;
+    s->gameMode = s->pendingMode;
+    app_reset_world_for_mode(s);
+}
+
+static void app_update_player_direction(AppState* s) {
+    Vec2 moveDir = {0, 0};
+    if (s->input.up) moveDir.y -= 1;
+    if (s->input.down) moveDir.y += 1;
+    if (s->input.left) moveDir.x -= 1;
+    if (s->input.right) moveDir.x += 1;
+
+    if (moveDir.x != 0 || moveDir.y != 0) {
+        s->playerDir = normalize_or_default(moveDir, s->playerDir);
+    }
+}
+
+static void app_update_shockwave(AppState* s, double simDt) {
+    ShockwaveSettings settings = get_shockwave_settings(s->gameMode);
+
+    if (s->shockCooldown > 0.0) s->shockCooldown -= simDt;
+    if (s->shockTime > 0.0) s->shockTime -= simDt;
+
+    if (s->shockRequest) {
+        if (s->shockCooldown <= 0.0 && s->shockTime <= 0.0) {
+            s->shockTime = 0.18;
+            s->shockCooldown = 1.00;
+            s->shockRadius = settings.radius;
+            apply_shockwave(&s->world, simDt, settings.radius, settings.strength);
+        }
+        s->shockRequest = false;
+    }
+
+    if (s->shockTime > 0.0) {
+        apply_shockwave(&s->world, simDt, s->shockRadius, settings.strength);
+    }
+
+    s->ui.hpHeartAnimTime += simDt;
+}
+
+static void app_step_boids(AppState* s, double simDt) {
+    if (s->cfg.mode == RUNMODE_SEQ) {
+        world_step_range(&s->world, &s->world, 0, s->world.boidCount, simDt);
+        world_swap_buffers(&s->world);
+    } else {
+        update_pthreads_step(&s->updater, &s->world, simDt);
+    }
+}
+
+static void app_apply_survival_rules(AppState* s) {
+    const float hitR = 1.6f;
+    const float hitR2 = hitR * hitR;
+    const float worldW = (float)s->world.width;
+    const float worldH = (float)s->world.height;
+
+    for (size_t i = 0; i < s->world.boidCount; i++) {
+        const Boid* boid = &s->world.boids[i];
+        float dx;
+        float dy;
+        float d2;
+
+        if (!boid->alive || !boid->predator) continue;
+
+        dx = torus_delta_f(boid->pos.x - s->world.player.pos.x, worldW);
+        dy = torus_delta_f(boid->pos.y - s->world.player.pos.y, worldH);
+        d2 = dx * dx + dy * dy;
+        if (d2 < hitR2 && s->playerDamageCooldown <= 0.0) {
+            s->playerHp--;
+            s->playerDamageCooldown = 0.75;
+            if (s->playerHp <= 0) {
+                app_reset_world_for_mode(s);
+            }
+            return;
+        }
+    }
+}
+
+static void app_apply_terminate_rules(AppState* s) {
+    const float killR = 1.4f;
+    const float killR2 = killR * killR;
+    const float worldW = (float)s->world.width;
+    const float worldH = (float)s->world.height;
+
+    for (size_t i = 0; i < s->world.boidCount; i++) {
+        Boid* boid = &s->world.boids[i];
+        float dx;
+        float dy;
+        float d2;
+
+        if (!boid->alive || boid->predator) continue;
+
+        dx = torus_delta_f(boid->pos.x - s->world.player.pos.x, worldW);
+        dy = torus_delta_f(boid->pos.y - s->world.player.pos.y, worldH);
+        d2 = dx * dx + dy * dy;
+        if (d2 < killR2) {
+            boid->alive = 0;
+            s->terminateKills++;
+        }
+    }
+}
+
+static void app_apply_mode_rules(AppState* s) {
+    if (s->gameMode == GAMEMODE_SURVIVAL) {
+        app_apply_survival_rules(s);
+    } else if (s->gameMode == GAMEMODE_TERMINATE44) {
+        app_apply_terminate_rules(s);
+    }
+}
+
+static void app_step_simulation(AppState* s, double simDt) {
+    app_update_world_bounds_for_window(s);
+    app_apply_pending_mode_change(s);
+    app_update_player_direction(s);
+    world_apply_player_input(&s->world, &s->input, simDt);
+    app_update_shockwave(s, simDt);
+    app_step_boids(s, simDt);
+    if (s->playerDamageCooldown > 0.0) s->playerDamageCooldown -= simDt;
+    if (s->playerDamageCooldown < 0.0) s->playerDamageCooldown = 0.0;
+    if (s->gameMode == GAMEMODE_SURVIVAL) {
+        s->survivalTime += simDt;
+    }
+    app_apply_mode_rules(s);
 }
 
 static void update_window_title(AppState* s) {
@@ -772,62 +1351,15 @@ int main(int argc, char** argv) {
 
     srand((unsigned)time_now_us());
 
-    AppState st = {0};
-    st.cfg = cfg;
-    st.baseWorldW = cfg.width;
-    st.baseWorldH = cfg.height;
-    st.targetPixelsPerUnit = 10.0f;
-    st.playerDir = (Vec2){1.0f, 0.0f};
-    st.gameMode = GAMEMODE_PEACEFUL;
-    st.menuOpen = false;
-    st.pendingModeChange = false;
-    st.pendingMode = st.gameMode;
+    AppState st = app_make_initial_state(cfg);
 
-    if (!world_init(&st.world, cfg.width, cfg.height, (size_t)cfg.boidCount)) {
-        fprintf(stderr, "world_init failed\n");
-        return 1;
-    }
-
-    app_reset_world_for_mode(&st);
-
-    if (cfg.mode == RUNMODE_PTHREAD) {
-        if (!update_pthreads_init(&st.updater, (size_t)cfg.threadCount)) {
-            fprintf(stderr, "update_pthreads_init failed\n");
-            world_destroy(&st.world);
-            return 1;
-        }
-        st.updaterInited = true;
-    }
-
-    const int scale = 10;
-    const int winW = cfg.width * scale;
-    const int winH = cfg.height * scale;
-
-    st.window = SDL_CreateWindow(
-        "Boids (SDL2)",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        winW,
-        winH,
-        SDL_WINDOW_RESIZABLE);
-
-    if (!st.window) {
-        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        if (st.updaterInited) update_pthreads_destroy(&st.updater);
-        world_destroy(&st.world);
+    if (!app_create_world_and_updater(&st)) {
         SDL_Quit();
         return 1;
     }
 
-    st.renderer = SDL_CreateRenderer(st.window, -1, SDL_RENDERER_ACCELERATED);
-    if (!st.renderer) {
-        st.renderer = SDL_CreateRenderer(st.window, -1, SDL_RENDERER_SOFTWARE);
-    }
-    if (!st.renderer) {
-        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(st.window);
-        if (st.updaterInited) update_pthreads_destroy(&st.updater);
-        world_destroy(&st.world);
+    if (!app_create_window_and_renderer(&st)) {
+        app_destroy(&st);
         SDL_Quit();
         return 1;
     }
@@ -837,52 +1369,7 @@ int main(int argc, char** argv) {
     uint64_t lastUs = time_now_us();
 
     while (!st.quit) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
-                st.quit = true;
-                break;
-            }
-
-            if (e.type == SDL_MOUSEBUTTONDOWN) {
-                /* dropdown mode selection */
-                const int mx = e.button.x;
-                const int my = e.button.y;
-                const int left = e.button.button;
-                if (left == SDL_BUTTON_LEFT) {
-                    int bx, by, bw, bh, lx, ly, lw, lh, ih;
-                    get_mode_dropdown_rects(&bx, &by, &bw, &bh, &lx, &ly, &lw, &lh, &ih);
-                    if (pt_in_rect(mx, my, bx, by, bw, bh)) {
-                        st.menuOpen = !st.menuOpen;
-                    } else if (st.menuOpen && pt_in_rect(mx, my, lx, ly, lw, lh)) {
-                        int idx = (my - ly) / ih;
-                        if (idx < 0) idx = 0;
-                        if (idx > 2) idx = 2;
-                        st.pendingMode = (GameMode)idx;
-                        st.pendingModeChange = true;
-                        st.menuOpen = false;
-                    } else {
-                        st.menuOpen = false;
-                    }
-                }
-            }
-
-            if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
-                const bool down = (e.type == SDL_KEYDOWN);
-                SDL_Keycode key = e.key.keysym.sym;
-                input_set_key(&st.input, key, down);
-                if (down && (key == SDLK_SPACE || key == ' ')) {
-                    st.shockRequest = true;
-                }
-                if (down && (key == SDLK_ESCAPE || key == SDLK_q)) {
-                    st.quit = true;
-                    break;
-                }
-            }
-            if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                app_update_world_bounds_for_window(&st);
-            }
-        }
+        app_poll_events(&st);
         if (st.quit) break;
 
         uint64_t nowUs = time_now_us();
@@ -892,96 +1379,8 @@ int main(int argc, char** argv) {
         acc += frameDt;
 
         while (acc >= simDt) {
-            app_update_world_bounds_for_window(&st);
-
-            if (st.pendingModeChange) {
-                st.pendingModeChange = false;
-                st.gameMode = st.pendingMode;
-                app_reset_world_for_mode(&st);
-            }
-
-            Vec2 moveDir = {0, 0};
-            if (st.input.up) moveDir.y -= 1;
-            if (st.input.down) moveDir.y += 1;
-            if (st.input.left) moveDir.x -= 1;
-            if (st.input.right) moveDir.x += 1;
-            if (moveDir.x != 0 || moveDir.y != 0) {
-                float l = sqrtf(moveDir.x * moveDir.x + moveDir.y * moveDir.y);
-                if (l > 1e-6f) st.playerDir = (Vec2){moveDir.x / l, moveDir.y / l};
-            }
-
-            world_apply_player_input(&st.world, &st.input, simDt);
-
-            /* shockwave ability */
-            if (st.shockCooldown > 0.0) st.shockCooldown -= simDt;
-            if (st.shockTime > 0.0) st.shockTime -= simDt;
-            if (st.shockRequest && st.shockCooldown <= 0.0) {
-                st.shockRequest = false;
-                st.shockTime = 0.18;
-                st.shockCooldown = 1.00;
-
-                float radius = 7.0f;
-                float strength = 18.0f;
-                if (st.gameMode == GAMEMODE_SURVIVAL) { radius = 12.0f; strength = 26.0f; }
-                if (st.gameMode == GAMEMODE_TERMINATE44) { radius = 10.0f; strength = 22.0f; }
-                st.shockRadius = radius;
-                apply_shockwave(&st.world, simDt, radius, strength);
-            }
-
-            if (st.shockTime > 0.0) {
-                float radius = st.shockRadius;
-                float strength = 18.0f;
-                if (st.gameMode == GAMEMODE_SURVIVAL) strength = 26.0f;
-                if (st.gameMode == GAMEMODE_TERMINATE44) strength = 22.0f;
-                apply_shockwave(&st.world, simDt, radius, strength);
-            }
-
             const uint64_t t0 = time_now_us();
-            if (cfg.mode == RUNMODE_SEQ) {
-                world_step_range(&st.world, &st.world, 0, st.world.boidCount, simDt);
-                world_swap_buffers(&st.world);
-            } else {
-                update_pthreads_step(&st.updater, &st.world, simDt);
-            }
-
-            /* mode rules that need current positions */
-            if (st.gameMode == GAMEMODE_SURVIVAL) {
-                const float hitR = 1.6f;
-                const float hitR2 = hitR * hitR;
-                const float ww = (float)st.world.width;
-                const float hh = (float)st.world.height;
-                bool dead = false;
-                for (size_t i = 0; i < st.world.boidCount; i++) {
-                    const Boid* b = &st.world.boids[i];
-                    if (!b->alive || !b->predator) continue;
-                    float dx = torus_delta_f(b->pos.x - st.world.player.pos.x, ww);
-                    float dy = torus_delta_f(b->pos.y - st.world.player.pos.y, hh);
-                    float d2 = dx * dx + dy * dy;
-                    if (d2 < hitR2) { dead = true; break; }
-                }
-                if (dead) {
-                    app_reset_world_for_mode(&st);
-                }
-            }
-
-            if (st.gameMode == GAMEMODE_TERMINATE44) {
-                const float killR = 1.4f;
-                const float killR2 = killR * killR;
-                const float ww = (float)st.world.width;
-                const float hh = (float)st.world.height;
-                for (size_t i = 0; i < st.world.boidCount; i++) {
-                    Boid* b = &st.world.boids[i];
-                    if (!b->alive) continue;
-                    if (b->predator) continue;
-                    float dx = torus_delta_f(b->pos.x - st.world.player.pos.x, ww);
-                    float dy = torus_delta_f(b->pos.y - st.world.player.pos.y, hh);
-                    float d2 = dx * dx + dy * dy;
-                    if (d2 < killR2) {
-                        b->alive = 0;
-                        st.terminateKills++;
-                    }
-                }
-            }
+            app_step_simulation(&st, simDt);
             const uint64_t t1 = time_now_us();
             const double ms = (double)(t1 - t0) / 1000.0;
             st.avgCount++;
@@ -995,10 +1394,7 @@ int main(int argc, char** argv) {
         time_sleep_us(1000);
     }
 
-    if (st.renderer) SDL_DestroyRenderer(st.renderer);
-    if (st.window) SDL_DestroyWindow(st.window);
-    if (st.updaterInited) update_pthreads_destroy(&st.updater);
-    world_destroy(&st.world);
+    app_destroy(&st);
     SDL_Quit();
     return 0;
 }
