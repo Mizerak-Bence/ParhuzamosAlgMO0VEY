@@ -7,6 +7,9 @@ typedef struct AppConfig {
     int width;
     int height;
     int threads;
+    bool benchmarkOnly;
+    bool liveBenchmarkSession;
+    int benchmarkSteps;
 } AppConfig;
 
 typedef struct Life {
@@ -22,4 +25,5 @@ void life_destroy(Life* life);
 void life_toggle(Life* life, int x, int y);
 void life_seed_glider(Life* life, int x, int y);
 
+double life_step_seq(Life* life);
 double life_step_openmp(Life* life, int threads);

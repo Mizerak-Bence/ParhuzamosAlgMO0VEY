@@ -1,12 +1,37 @@
 #include "life.h"
 
-#include "timeutil.h"
-
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+static uint64_t time_now_us(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    LARGE_INTEGER now;
+
+    if (!init) {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart * 1000000ULL) / (uint64_t)freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
+#endif
+}
 
 static int idx(const Life* life, int x, int y) {
     return y * life->width + x;
@@ -60,6 +85,35 @@ static int count_neighbors(const Life* life, int x, int y) {
     return n;
 }
 
+static uint8_t next_cell_state(const Life* life, int x, int y) {
+    int n = count_neighbors(life, x, y);
+    uint8_t alive = life->a[idx(life, x, y)];
+
+    if (alive) {
+        return (n == 2 || n == 3) ? 1 : 0;
+    }
+    return (n == 3) ? 1 : 0;
+}
+
+static void life_swap_buffers(Life* life) {
+    uint8_t* tmp = life->a;
+    life->a = life->b;
+    life->b = tmp;
+}
+
+double life_step_seq(Life* life) {
+    uint64_t t0 = time_now_us();
+
+    for (int y = 0; y < life->height; y++) {
+        for (int x = 0; x < life->width; x++) {
+            life->b[idx(life, x, y)] = next_cell_state(life, x, y);
+        }
+    }
+
+    life_swap_buffers(life);
+    return (double)(time_now_us() - t0) / 1000.0;
+}
+
 double life_step_openmp(Life* life, int threads) {
 #ifdef _OPENMP
     omp_set_num_threads(threads);
@@ -74,23 +128,10 @@ double life_step_openmp(Life* life, int threads) {
 #endif
     for (int y = 0; y < life->height; y++) {
         for (int x = 0; x < life->width; x++) {
-            int n = count_neighbors(life, x, y);
-            uint8_t alive = life->a[idx(life, x, y)];
-            uint8_t next = 0;
-            if (alive) {
-                next = (n == 2 || n == 3) ? 1 : 0;
-            } else {
-                next = (n == 3) ? 1 : 0;
-            }
-            life->b[idx(life, x, y)] = next;
+            life->b[idx(life, x, y)] = next_cell_state(life, x, y);
         }
     }
 
-    uint64_t t1 = time_now_us();
-
-    uint8_t* tmp = life->a;
-    life->a = life->b;
-    life->b = tmp;
-
-    return (double)(t1 - t0) / 1000.0;
+    life_swap_buffers(life);
+    return (double)(time_now_us() - t0) / 1000.0;
 }

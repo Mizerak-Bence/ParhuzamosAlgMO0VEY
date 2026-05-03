@@ -18,6 +18,14 @@ typedef struct Player {
     float speed;
 } Player;
 
+typedef struct InputState {
+    bool up;
+    bool down;
+    bool left;
+    bool right;
+    bool quit;
+} InputState;
+
 typedef struct World {
     int width;
     int height;
@@ -30,7 +38,6 @@ typedef struct World {
 bool world_init(World* world, int width, int height, size_t boidCount);
 void world_destroy(World* world);
 
-struct InputState;
-void world_apply_player_input(World* world, const struct InputState* input, double dt);
+void world_apply_player_input(World* world, const InputState* input, double dt);
 
 void world_step_range(const World* worldRead, World* worldWrite, size_t begin, size_t end, double dt);

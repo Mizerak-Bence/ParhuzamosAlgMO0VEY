@@ -1,7 +1,5 @@
 #include "boids.h"
 
-#include "input.h"
-
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
