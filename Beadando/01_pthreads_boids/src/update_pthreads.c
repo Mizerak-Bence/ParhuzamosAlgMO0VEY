@@ -25,6 +25,7 @@ typedef struct Impl {
     bool stop;
 } Impl;
 
+
 static void* worker_main(void* p) {
     WorkerCtx* ctx = (WorkerCtx*)p;
     Impl* impl = ctx->impl;

@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,13 +16,8 @@
 #include <SDL.h>
 #else
 #if defined(__INTELLISENSE__)
-/*
-   IntelliSense fallback:
-   The project builds via the Makefile (with MSYS2 include paths), but VS Code's
-   C/C++ extension may not automatically inherit those include paths.
-   These minimal stubs prevent a wall of editor-only errors without affecting
-   real compilation.
-*/
+
+
 typedef unsigned char Uint8;
 typedef unsigned int Uint32;
 typedef unsigned long long Uint64;
@@ -157,7 +153,31 @@ typedef struct AppConfig {
     int boidCount;
     int threadCount;
     RunMode mode;
+    GameMode gameMode;
+    bool benchmarkMode;
+    bool benchmarkCompare;
+    bool liveBenchmarkSession;
+    int benchmarkSteps;
+    int benchmarkWarmup;
 } AppConfig;
+
+typedef struct BenchmarkResult {
+    double totalMs;
+    double avgMs;
+    double ticksPerSecond;
+} BenchmarkResult;
+
+enum {
+    BENCHMARK_WARMUP_STEPS = 100,
+};
+
+typedef struct LiveBenchmarkState {
+    bool enabled;
+    uint64_t startUs;
+    uint64_t lastLogUs;
+    double intervalMsSum;
+    int intervalTickCount;
+} LiveBenchmarkState;
 
 typedef struct DropdownLayout {
     int buttonX;
@@ -228,8 +248,26 @@ typedef struct UiAssets {
 } UiAssets;
 
 static void print_usage(const char* exe) {
-    printf("Usage: %s [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H]\n", exe);
+    printf("Usage: %s [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H] [--game peaceful|survival|terminate44]\n", exe);
+    printf("       %s --benchmark N [--compare] [--mode seq|pthread] [--threads N] [--boids N] [--width W] [--height H] [--game peaceful|survival|terminate44]\n", exe);
     printf("Controls (in window): WASD move player, Q or ESC quit\n");
+}
+
+static bool parse_game_mode(const char* s, GameMode* outMode) {
+    if (!s || !outMode) return false;
+    if (strcmp(s, "peaceful") == 0) {
+        *outMode = GAMEMODE_PEACEFUL;
+        return true;
+    }
+    if (strcmp(s, "survival") == 0) {
+        *outMode = GAMEMODE_SURVIVAL;
+        return true;
+    }
+    if (strcmp(s, "terminate44") == 0 || strcmp(s, "terminate") == 0) {
+        *outMode = GAMEMODE_TERMINATE44;
+        return true;
+    }
+    return false;
 }
 
 static int parse_int(const char* s, int defaultValue) {
@@ -271,6 +309,7 @@ typedef struct AppState {
 
     double avgMs;
     int avgCount;
+    LiveBenchmarkState liveBenchmark;
 
     SDL_Window* window;
     SDL_Renderer* renderer;
@@ -294,6 +333,9 @@ typedef struct AppState {
     double playerDamageCooldown;
 } AppState;
 
+static FILE* g_benchmarkLogFile = NULL;
+static char g_benchmarkLogPath[260] = {0};
+
 static void set_group_color(SDL_Renderer* r, unsigned char group, int groupCount);
 
 static float torus_delta_f(float d, float size) {
@@ -303,6 +345,307 @@ static float torus_delta_f(float d, float size) {
     else if (d < -h) d += size;
     return d;
 }
+
+static const char* run_mode_name(RunMode mode) {
+    return mode == RUNMODE_SEQ ? "seq" : "pthread";
+}
+
+static bool exe_name_is_benchmark(const char* exePath) {
+    const char* base = exePath;
+
+    if (!exePath) return false;
+
+    for (const char* p = exePath; *p; p++) {
+        if (*p == '\\' || *p == '/' || *p == ':') base = p + 1;
+    }
+
+    return strstr(base, "benchmark") != NULL;
+}
+
+static bool benchmark_open_log_file(void) {
+    if (g_benchmarkLogFile) return true;
+
+#ifdef _WIN32
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(g_benchmarkLogPath, sizeof(g_benchmarkLogPath),
+             "benchmark_session_%04u%02u%02u_%02u%02u%02u.txt",
+             (unsigned)st.wYear,
+             (unsigned)st.wMonth,
+             (unsigned)st.wDay,
+             (unsigned)st.wHour,
+             (unsigned)st.wMinute,
+             (unsigned)st.wSecond);
+#else
+    snprintf(g_benchmarkLogPath, sizeof(g_benchmarkLogPath), "benchmark_session_last.txt");
+#endif
+
+    g_benchmarkLogFile = fopen(g_benchmarkLogPath, "w");
+    return g_benchmarkLogFile != NULL;
+}
+
+static void benchmark_close_log_file(void) {
+    if (!g_benchmarkLogFile) return;
+    fclose(g_benchmarkLogFile);
+    g_benchmarkLogFile = NULL;
+}
+
+static const char* benchmark_log_path(void) {
+    return g_benchmarkLogPath[0] ? g_benchmarkLogPath : NULL;
+}
+
+static void benchmark_write_text(const AppConfig* cfg, const char* text) {
+    (void)cfg;
+
+    if (!cfg || !text) return;
+
+    fputs(text, stdout);
+    fflush(stdout);
+
+    if (g_benchmarkLogFile) {
+        fputs(text, g_benchmarkLogFile);
+        fflush(g_benchmarkLogFile);
+    }
+}
+
+static void benchmark_printf(const AppConfig* cfg, const char* fmt, ...) {
+    char text[768];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+
+    benchmark_write_text(cfg, text);
+}
+
+static void benchmark_attach_console(void) {
+#ifdef _WIN32
+    static bool attached = false;
+
+    if (attached) return;
+
+    if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
+        (void)freopen("CONOUT$", "w", stdout);
+        (void)freopen("CONOUT$", "w", stderr);
+        (void)freopen("CONIN$", "r", stdin);
+        attached = true;
+    }
+#endif
+}
+
+#ifdef _WIN32
+enum {
+    STARTUP_ID_BOIDS = 1001,
+    STARTUP_ID_THREADS = 1002,
+    STARTUP_ID_STEPS = 1003,
+    STARTUP_ID_START = 1005,
+    STARTUP_ID_CANCEL = 1006,
+};
+
+typedef struct StartupPromptState {
+    AppConfig* cfg;
+    bool benchmarkPrompt;
+    bool accepted;
+    HWND boidsEdit;
+    HWND threadsEdit;
+    HWND stepsEdit;
+} StartupPromptState;
+
+static HWND startup_create_label(HWND parent, const char* text, int x, int y, int w, int h) {
+    return CreateWindowExA(0, "STATIC", text,
+                           WS_CHILD | WS_VISIBLE,
+                           x, y, w, h,
+                           parent, NULL, GetModuleHandleA(NULL), NULL);
+}
+
+static HWND startup_create_edit(HWND parent, int id, const char* text, int x, int y, int w, int h) {
+    return CreateWindowExA(0, "EDIT", text,
+                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+                           x, y, w, h,
+                           parent, (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+}
+
+static HWND startup_create_button(HWND parent, int id, const char* text, int x, int y, int w, int h) {
+    return CreateWindowExA(0, "BUTTON", text,
+                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                           x, y, w, h,
+                           parent, (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+}
+
+static int startup_read_edit_int(HWND edit, int fallbackValue) {
+    char buffer[64];
+
+    if (!edit) return fallbackValue;
+    GetWindowTextA(edit, buffer, (int)sizeof(buffer));
+    return parse_int(buffer, fallbackValue);
+}
+
+static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
+    AppConfig next = *state->cfg;
+
+    next.boidCount = startup_read_edit_int(state->boidsEdit, next.boidCount);
+    next.threadCount = startup_read_edit_int(state->threadsEdit, next.threadCount);
+    next.mode = next.threadCount <= 1 ? RUNMODE_SEQ : RUNMODE_PTHREAD;
+    next.benchmarkMode = false;
+    next.benchmarkCompare = false;
+    next.liveBenchmarkSession = false;
+
+    if (state->benchmarkPrompt) {
+        next.benchmarkSteps = startup_read_edit_int(state->stepsEdit, next.benchmarkSteps);
+        next.benchmarkWarmup = BENCHMARK_WARMUP_STEPS;
+        next.benchmarkCompare = true;
+        next.liveBenchmarkSession = true;
+        next.mode = next.threadCount <= 1 ? RUNMODE_SEQ : RUNMODE_PTHREAD;
+    }
+
+    if (next.boidCount <= 0 || next.threadCount <= 0) {
+        MessageBoxA(hwnd, "A boid es a szal szam legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
+        return false;
+    }
+    if (state->benchmarkPrompt && next.benchmarkSteps <= 0) {
+        MessageBoxA(hwnd, "Az osszehasonlitasi lepesek szama legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
+        return false;
+    }
+
+    *state->cfg = next;
+    state->accepted = true;
+    DestroyWindow(hwnd);
+    return true;
+}
+
+static LRESULT CALLBACK startup_prompt_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    StartupPromptState* state = (StartupPromptState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_NCCREATE: {
+        CREATESTRUCTA* cs = (CREATESTRUCTA*)lParam;
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return TRUE;
+    }
+    case WM_CREATE: {
+        char buffer[32];
+        int y = 18;
+
+        state = (StartupPromptState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        startup_create_label(hwnd,
+                             state->benchmarkPrompt ? "Add meg a meresi inditasi adatokat." : "Add meg a jatek inditasi adatait.",
+                             18, y, 320, 18);
+        y += 32;
+
+        startup_create_label(hwnd, "Boid darab:", 18, y + 3, 120, 20);
+        snprintf(buffer, sizeof(buffer), "%d", state->cfg->boidCount);
+        state->boidsEdit = startup_create_edit(hwnd, STARTUP_ID_BOIDS, buffer, 150, y, 140, 24);
+        y += 34;
+
+        startup_create_label(hwnd, "Szalak szama:", 18, y + 3, 120, 20);
+        snprintf(buffer, sizeof(buffer), "%d", state->cfg->threadCount);
+        state->threadsEdit = startup_create_edit(hwnd, STARTUP_ID_THREADS, buffer, 150, y, 140, 24);
+        y += 34;
+
+        if (state->benchmarkPrompt) {
+            startup_create_label(hwnd, "Osszevetesi lepesek:", 18, y + 3, 120, 20);
+            snprintf(buffer, sizeof(buffer), "%d", state->cfg->benchmarkSteps > 0 ? state->cfg->benchmarkSteps : 500);
+            state->stepsEdit = startup_create_edit(hwnd, STARTUP_ID_STEPS, buffer, 150, y, 140, 24);
+            y += 34;
+        }
+
+        startup_create_button(hwnd, STARTUP_ID_START, "Inditas", 70, y + 10, 90, 28);
+        startup_create_button(hwnd, STARTUP_ID_CANCEL, "Megse", 180, y + 10, 90, 28);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (!state) return 0;
+        if (LOWORD(wParam) == STARTUP_ID_START) {
+            startup_collect_values(hwnd, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == STARTUP_ID_CANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        break;
+    }
+
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
+    static bool classRegistered = false;
+    const char* className = "BoidsStartupPromptWindow";
+    StartupPromptState state;
+    WNDCLASSA wc;
+    HWND hwnd;
+    MSG msg;
+    RECT clientRect;
+    const DWORD windowStyle = WS_CAPTION | WS_SYSMENU;
+    const DWORD windowExStyle = WS_EX_DLGMODALFRAME;
+    int width;
+    int height;
+    int clientWidth = 340;
+    int clientHeight = benchmarkPrompt ? 210 : 180;
+    int x;
+    int y;
+
+    if (!cfg) return false;
+
+    if (!classRegistered) {
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = startup_prompt_proc;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.lpszClassName = className;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        if (!RegisterClassA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+        classRegistered = true;
+    }
+
+    memset(&state, 0, sizeof(state));
+    state.cfg = cfg;
+    state.benchmarkPrompt = benchmarkPrompt;
+
+    clientRect.left = 0;
+    clientRect.top = 0;
+    clientRect.right = clientWidth;
+    clientRect.bottom = clientHeight;
+    AdjustWindowRectEx(&clientRect, windowStyle, FALSE, windowExStyle);
+    width = clientRect.right - clientRect.left;
+    height = clientRect.bottom - clientRect.top;
+    x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+    y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+
+    hwnd = CreateWindowExA(windowExStyle,
+                           className,
+                           benchmarkPrompt ? "Boids meres inditas" : "Boids jatek inditas",
+                           windowStyle | WS_VISIBLE,
+                           x, y, width, height,
+                           NULL, NULL, GetModuleHandleA(NULL), &state);
+    if (!hwnd) return false;
+
+    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+
+    return state.accepted;
+}
+#else
+static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
+    (void)cfg;
+    (void)benchmarkPrompt;
+    return false;
+}
+#endif
 
 static const char* game_mode_name(GameMode m) {
     switch (m) {
@@ -1023,7 +1366,7 @@ static AppState app_make_initial_state(AppConfig cfg) {
     state.baseWorldH = cfg.height;
     state.targetPixelsPerUnit = 10.0f;
     state.playerDir = (Vec2){1.0f, 0.0f};
-    state.gameMode = GAMEMODE_PEACEFUL;
+    state.gameMode = cfg.gameMode;
     state.pendingMode = state.gameMode;
     state.showStatsPanel = true;
     state.playerMaxHp = 10;
@@ -1197,13 +1540,222 @@ static void app_update_shockwave(AppState* s, double simDt) {
     s->ui.hpHeartAnimTime += simDt;
 }
 
+/*
+   The actual parallelization enters here.
+   - seq path: world_step_range + world_swap_buffers
+   - pthread path: update_pthreads_step
+*/
+static void app_step_boids_seq(AppState* s, double simDt) {
+    world_step_range(&s->world, &s->world, 0, s->world.boidCount, simDt);
+    world_swap_buffers(&s->world);
+}
+
+static void app_step_boids_pthread(AppState* s, double simDt) {
+    update_pthreads_step(&s->updater, &s->world, simDt);
+}
+
 static void app_step_boids(AppState* s, double simDt) {
     if (s->cfg.mode == RUNMODE_SEQ) {
-        world_step_range(&s->world, &s->world, 0, s->world.boidCount, simDt);
-        world_swap_buffers(&s->world);
+        app_step_boids_seq(s, simDt);
     } else {
-        update_pthreads_step(&s->updater, &s->world, simDt);
+        app_step_boids_pthread(s, simDt);
     }
+}
+
+static BenchmarkResult app_run_benchmark(AppState* s, int warmupSteps, int measureSteps, double simDt) {
+    BenchmarkResult result = {0};
+
+    for (int i = 0; i < warmupSteps; i++) {
+        app_step_boids(s, simDt);
+    }
+
+    {
+        uint64_t t0 = time_now_us();
+        for (int i = 0; i < measureSteps; i++) {
+            app_step_boids(s, simDt);
+        }
+        uint64_t t1 = time_now_us();
+        result.totalMs = (double)(t1 - t0) / 1000.0;
+    }
+
+    if (measureSteps > 0) {
+        result.avgMs = result.totalMs / (double)measureSteps;
+    }
+    if (result.totalMs > 0.0) {
+        result.ticksPerSecond = (double)measureSteps * 1000.0 / result.totalMs;
+    }
+
+    return result;
+}
+
+static bool app_prepare_benchmark_state(AppState* s, AppConfig cfg, unsigned seed) {
+    *s = app_make_initial_state(cfg);
+    srand(seed);
+    return app_create_world_and_updater(s);
+}
+
+static void print_benchmark_result(const AppConfig* cfg, const BenchmarkResult* result) {
+    char text[512];
+
+    snprintf(text, sizeof(text),
+             "benchmark mode=%s game=%s section=world_update_only threads=%d boids=%d size=%dx%d steps=%d total=%.3f ms avg=%.3f ms/tick ticks=%.2f/s\n",
+             run_mode_name(cfg->mode),
+             game_mode_name(cfg->gameMode),
+             cfg->threadCount,
+             cfg->boidCount,
+             cfg->width,
+             cfg->height,
+             cfg->benchmarkSteps,
+             result->totalMs,
+             result->avgMs,
+             result->ticksPerSecond);
+
+    benchmark_write_text(cfg, text);
+}
+
+static int run_single_benchmark(const AppConfig* cfg, double simDt) {
+    const unsigned benchmarkSeed = 12345u;
+    AppState state;
+    BenchmarkResult result;
+
+    if (!app_prepare_benchmark_state(&state, *cfg, benchmarkSeed)) {
+        return 1;
+    }
+
+    result = app_run_benchmark(&state, cfg->benchmarkWarmup, cfg->benchmarkSteps, simDt);
+    print_benchmark_result(cfg, &result);
+    app_destroy(&state);
+    return 0;
+}
+
+static int run_compare_benchmark(const AppConfig* cfg, double simDt) {
+    const unsigned benchmarkSeed = 12345u;
+    AppConfig seqCfg = *cfg;
+    AppConfig pthreadCfg = *cfg;
+    AppState seqState;
+    AppState pthreadState;
+    BenchmarkResult seqResult;
+    BenchmarkResult pthreadResult;
+    double speedup = 0.0;
+    char text[768];
+
+    seqCfg.mode = RUNMODE_SEQ;
+    seqCfg.threadCount = 1;
+    pthreadCfg.mode = RUNMODE_PTHREAD;
+
+    if (!app_prepare_benchmark_state(&seqState, seqCfg, benchmarkSeed)) {
+        return 1;
+    }
+    if (!app_prepare_benchmark_state(&pthreadState, pthreadCfg, benchmarkSeed)) {
+        app_destroy(&seqState);
+        return 1;
+    }
+
+    seqResult = app_run_benchmark(&seqState, seqCfg.benchmarkWarmup, seqCfg.benchmarkSteps, simDt);
+    pthreadResult = app_run_benchmark(&pthreadState, pthreadCfg.benchmarkWarmup, pthreadCfg.benchmarkSteps, simDt);
+
+    if (pthreadResult.avgMs > 0.0) {
+        speedup = seqResult.avgMs / pthreadResult.avgMs;
+    }
+
+        snprintf(text, sizeof(text),
+                 "benchmark compare game=%s section=world_update_only boids=%d size=%dx%d steps=%d\n"
+              "  seq:         avg=%.3f ms/tick | ticks=%.2f/s\n"
+              "  pthread(%d): avg=%.3f ms/tick | ticks=%.2f/s\n"
+              "  speedup:     %.2fx\n",
+              game_mode_name(cfg->gameMode),
+              cfg->boidCount,
+              cfg->width,
+              cfg->height,
+              cfg->benchmarkSteps,
+              seqResult.avgMs,
+              seqResult.ticksPerSecond,
+              pthreadCfg.threadCount,
+              pthreadResult.avgMs,
+              pthreadResult.ticksPerSecond,
+              speedup);
+
+        benchmark_write_text(cfg, text);
+
+    app_destroy(&seqState);
+    app_destroy(&pthreadState);
+    return 0;
+}
+
+static void app_init_live_benchmark(AppState* s) {
+    if (!s) return;
+
+    memset(&s->liveBenchmark, 0, sizeof(s->liveBenchmark));
+    if (!s->cfg.liveBenchmarkSession) return;
+
+    s->liveBenchmark.enabled = true;
+    s->liveBenchmark.startUs = time_now_us();
+    s->liveBenchmark.lastLogUs = s->liveBenchmark.startUs;
+
+    benchmark_printf(&s->cfg,
+                     "interactive benchmark start game=%s run=%s boids=%d threads=%d\n",
+                     game_mode_name(s->gameMode),
+                     run_mode_name(s->cfg.mode),
+                     s->cfg.boidCount,
+                     s->cfg.threadCount);
+}
+
+static void app_note_live_benchmark_step(AppState* s, double stepMs) {
+    if (!s || !s->liveBenchmark.enabled) return;
+
+    s->liveBenchmark.intervalMsSum += stepMs;
+    s->liveBenchmark.intervalTickCount++;
+}
+
+static void app_log_live_benchmark_if_needed(AppState* s) {
+    uint64_t nowUs;
+    uint64_t intervalUs;
+    double totalSec;
+    double intervalSec;
+    double intervalAvgMs = 0.0;
+    double intervalTicksPerSec = 0.0;
+
+    if (!s || !s->liveBenchmark.enabled) return;
+
+    nowUs = time_now_us();
+    intervalUs = nowUs - s->liveBenchmark.lastLogUs;
+    if (intervalUs < 1000000ULL) return;
+
+    totalSec = (double)(nowUs - s->liveBenchmark.startUs) / 1000000.0;
+    intervalSec = (double)intervalUs / 1000000.0;
+    if (s->liveBenchmark.intervalTickCount > 0) {
+        intervalAvgMs = s->liveBenchmark.intervalMsSum / (double)s->liveBenchmark.intervalTickCount;
+        intervalTicksPerSec = (double)s->liveBenchmark.intervalTickCount / intervalSec;
+    }
+
+    benchmark_printf(&s->cfg,
+                     "[live %.1fs] game=%s run=%s boids=%zu threads=%d interval=%.3f ms/tick overall=%.3f ms/tick ticks=%.2f/s\n",
+                     totalSec,
+                     game_mode_name(s->gameMode),
+                     run_mode_name(s->cfg.mode),
+                     s->world.boidCount,
+                     s->cfg.threadCount,
+                     intervalAvgMs,
+                     s->avgMs,
+                     intervalTicksPerSec);
+
+    s->liveBenchmark.lastLogUs = nowUs;
+    s->liveBenchmark.intervalMsSum = 0.0;
+    s->liveBenchmark.intervalTickCount = 0;
+}
+
+static void app_finish_live_benchmark(AppState* s) {
+    double totalSec;
+
+    if (!s || !s->liveBenchmark.enabled) return;
+
+    totalSec = (double)(time_now_us() - s->liveBenchmark.startUs) / 1000000.0;
+    benchmark_printf(&s->cfg,
+                     "interactive benchmark end runtime=%.1fs avg=%.3f ms/tick samples=%d log=%s\n",
+                     totalSec,
+                     s->avgMs,
+                     s->avgCount,
+                     benchmark_log_path() ? benchmark_log_path() : "-");
 }
 
 static void app_apply_survival_rules(AppState* s) {
@@ -1297,7 +1849,7 @@ static void update_window_title(AppState* s) {
     snprintf(title, sizeof(title),
              "Boids=%zu | run=%s | game=%s%s | threads=%d | avg=%.3f ms/tick | 1/2/3 mode | SPACE shock | WASD | Q/ESC quit",
              s->world.boidCount,
-             s->cfg.mode == RUNMODE_SEQ ? "seq" : "pthread",
+             run_mode_name(s->cfg.mode),
              gm,
              extra,
              s->cfg.threadCount,
@@ -1306,47 +1858,110 @@ static void update_window_title(AppState* s) {
 }
 
 int main(int argc, char** argv) {
+    const bool benchmarkExe = exe_name_is_benchmark(argc > 0 ? argv[0] : NULL);
     AppConfig cfg = {
         .width = 80,
         .height = 25,
-            .boidCount = 800,
+        .boidCount = 800,
         .threadCount = 4,
         .mode = RUNMODE_PTHREAD,
+        .gameMode = GAMEMODE_PEACEFUL,
+        .benchmarkMode = false,
+        .benchmarkCompare = false,
+        .liveBenchmarkSession = false,
+        .benchmarkSteps = 0,
+        .benchmarkWarmup = BENCHMARK_WARMUP_STEPS,
     };
+    const double simDt = 1.0 / 120.0;
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0) {
-            print_usage(argv[0]);
+    if (argc <= 1) {
+        cfg.benchmarkSteps = 500;
+        cfg.benchmarkWarmup = BENCHMARK_WARMUP_STEPS;
+        if (!prompt_startup_config(&cfg, benchmarkExe)) {
             return 0;
         }
-        if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
-            const char* m = argv[++i];
-            if (strcmp(m, "seq") == 0) cfg.mode = RUNMODE_SEQ;
-            else if (strcmp(m, "pthread") == 0) cfg.mode = RUNMODE_PTHREAD;
-            else {
-                fprintf(stderr, "Unknown mode: %s\n", m);
-                return 2;
+    } else {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--help") == 0) {
+                print_usage(argv[0]);
+                return 0;
             }
-            continue;
-        }
-        if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) { cfg.threadCount = parse_int(argv[++i], cfg.threadCount); continue; }
-        if (strcmp(argv[i], "--boids") == 0 && i + 1 < argc) { cfg.boidCount = parse_int(argv[++i], cfg.boidCount); continue; }
-        if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) { cfg.width = parse_int(argv[++i], cfg.width); continue; }
-        if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) { cfg.height = parse_int(argv[++i], cfg.height); continue; }
+            if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+                const char* m = argv[++i];
+                if (strcmp(m, "seq") == 0) cfg.mode = RUNMODE_SEQ;
+                else if (strcmp(m, "pthread") == 0) cfg.mode = RUNMODE_PTHREAD;
+                else {
+                    fprintf(stderr, "Unknown mode: %s\n", m);
+                    return 2;
+                }
+                continue;
+            }
+            if (strcmp(argv[i], "--game") == 0 && i + 1 < argc) {
+                if (!parse_game_mode(argv[++i], &cfg.gameMode)) {
+                    fprintf(stderr, "Unknown game mode: %s\n", argv[i]);
+                    return 2;
+                }
+                continue;
+            }
+            if (strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
+                cfg.benchmarkMode = true;
+                cfg.benchmarkSteps = parse_int(argv[++i], cfg.benchmarkSteps);
+                continue;
+            }
+            if (strcmp(argv[i], "--compare") == 0) {
+                cfg.benchmarkMode = true;
+                cfg.benchmarkCompare = true;
+                continue;
+            }
+            if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) { cfg.threadCount = parse_int(argv[++i], cfg.threadCount); continue; }
+            if (strcmp(argv[i], "--boids") == 0 && i + 1 < argc) { cfg.boidCount = parse_int(argv[++i], cfg.boidCount); continue; }
+            if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) { cfg.width = parse_int(argv[++i], cfg.width); continue; }
+            if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) { cfg.height = parse_int(argv[++i], cfg.height); continue; }
 
-        fprintf(stderr, "Unknown arg: %s\n", argv[i]);
-        print_usage(argv[0]);
-        return 2;
+            fprintf(stderr, "Unknown arg: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 2;
+        }
     }
 
     if (cfg.width <= 10 || cfg.height <= 10 || cfg.boidCount <= 0 || cfg.threadCount <= 0) {
         fprintf(stderr, "Invalid config. Use --help\n");
         return 2;
     }
+    if (cfg.benchmarkMode && cfg.benchmarkSteps <= 0) {
+        fprintf(stderr, "Benchmark mode needs a positive step count. Use --benchmark N\n");
+        return 2;
+    }
+    cfg.benchmarkWarmup = BENCHMARK_WARMUP_STEPS;
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (cfg.benchmarkMode || cfg.liveBenchmarkSession) {
+        benchmark_attach_console();
+    }
+
+    if (SDL_Init(cfg.benchmarkMode ? 0u : SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
+    }
+
+    if (cfg.benchmarkMode) {
+        int rc = cfg.benchmarkCompare ? run_compare_benchmark(&cfg, simDt) : run_single_benchmark(&cfg, simDt);
+        SDL_Quit();
+        return rc;
+    }
+
+    if (cfg.liveBenchmarkSession) {
+        if (!benchmark_open_log_file()) {
+            fprintf(stderr, "Warning: could not open benchmark log file for writing.\n");
+        }
+        benchmark_printf(&cfg,
+                         "benchmark launcher config boids=%d threads=%d compare_steps=%d\n",
+                         cfg.boidCount,
+                         cfg.threadCount,
+                         cfg.benchmarkSteps);
+        if (benchmark_log_path()) {
+            benchmark_printf(&cfg, "benchmark log file: %s\n", benchmark_log_path());
+        }
+        (void)run_compare_benchmark(&cfg, simDt);
     }
 
     srand((unsigned)time_now_us());
@@ -1354,17 +1969,20 @@ int main(int argc, char** argv) {
     AppState st = app_make_initial_state(cfg);
 
     if (!app_create_world_and_updater(&st)) {
+        benchmark_close_log_file();
         SDL_Quit();
         return 1;
     }
 
     if (!app_create_window_and_renderer(&st)) {
         app_destroy(&st);
+        benchmark_close_log_file();
         SDL_Quit();
         return 1;
     }
 
-    const double simDt = 1.0 / 120.0;
+    app_init_live_benchmark(&st);
+
     double acc = 0.0;
     uint64_t lastUs = time_now_us();
 
@@ -1385,16 +2003,20 @@ int main(int argc, char** argv) {
             const double ms = (double)(t1 - t0) / 1000.0;
             st.avgCount++;
             st.avgMs += (ms - st.avgMs) / (double)st.avgCount;
+            app_note_live_benchmark_step(&st, ms);
 
             acc -= simDt;
         }
 
+        app_log_live_benchmark_if_needed(&st);
         update_window_title(&st);
         draw_world_sdl(&st);
         time_sleep_us(1000);
     }
 
+    app_finish_live_benchmark(&st);
     app_destroy(&st);
+    benchmark_close_log_file();
     SDL_Quit();
     return 0;
 }
