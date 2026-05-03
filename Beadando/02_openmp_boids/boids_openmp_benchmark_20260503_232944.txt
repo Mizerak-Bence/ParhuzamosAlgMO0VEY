@@ -1,0 +1,4 @@
+benchmark compare section=boids_step width=80 height=25 boids=200 ticks=30
+  seq:        avg=0.083 ms/tick | ticks=12019.23/s
+  openmp(4): avg=0.084 ms/tick | ticks=11947.43/s
+  speedup:    0.99x

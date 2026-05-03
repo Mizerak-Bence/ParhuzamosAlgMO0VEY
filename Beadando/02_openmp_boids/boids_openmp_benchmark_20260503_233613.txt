@@ -1,0 +1,15 @@
+benchmark compare section=boids_step width=80 height=25 boids=2000 ticks=1000
+  seq:        avg=4.338 ms/tick | ticks=230.55/s
+  openmp(2): avg=4.313 ms/tick | ticks=231.87/s
+  speedup:    1.01x
+interactive benchmark start run=openmp boids=2000 threads=2
+[live 1.0s] run=openmp boids=2000 threads=2 interval=6.211 ms/tick overall=6.211 ms/tick ticks=19.45/s
+[live 2.1s] run=openmp boids=2000 threads=2 interval=7.123 ms/tick overall=6.667 ms/tick ticks=19.17/s
+[live 3.1s] run=openmp boids=2000 threads=2 interval=7.120 ms/tick overall=6.818 ms/tick ticks=19.21/s
+[live 4.1s] run=openmp boids=2000 threads=2 interval=8.314 ms/tick overall=7.178 ms/tick ticks=18.89/s
+[live 5.2s] run=openmp boids=2000 threads=2 interval=6.607 ms/tick overall=7.063 ms/tick ticks=19.03/s
+[live 6.2s] run=openmp boids=2000 threads=2 interval=6.828 ms/tick overall=7.023 ms/tick ticks=19.32/s
+[live 7.2s] run=openmp boids=2000 threads=2 interval=6.853 ms/tick overall=6.999 ms/tick ticks=19.32/s
+[live 8.3s] run=openmp boids=2000 threads=2 interval=6.831 ms/tick overall=6.978 ms/tick ticks=19.49/s
+[live 9.2s] run=openmp boids=2000 threads=2 interval=7.118 ms/tick overall=6.991 ms/tick ticks=18.30/s
+interactive benchmark end runtime=9.2s avg=6.991 ms/tick ticks=18.30/s log=boids_openmp_benchmark_20260503_233613.txt

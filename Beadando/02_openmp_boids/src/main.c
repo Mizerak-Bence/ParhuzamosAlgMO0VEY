@@ -1,5 +1,6 @@
-#include "life.h"
+#include "boids.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,12 +23,10 @@ typedef int SDL_Keycode;
 typedef struct SDL_Window SDL_Window;
 typedef struct SDL_Renderer SDL_Renderer;
 
-typedef struct SDL_Rect {
+typedef struct SDL_Point {
     int x;
     int y;
-    int w;
-    int h;
-} SDL_Rect;
+} SDL_Point;
 
 typedef struct SDL_Keysym {
     SDL_Keycode sym;
@@ -37,21 +36,15 @@ typedef struct SDL_KeyboardEvent {
     SDL_Keysym keysym;
 } SDL_KeyboardEvent;
 
-typedef struct SDL_WindowEvent {
-    Uint8 event;
-} SDL_WindowEvent;
-
 typedef struct SDL_Event {
     Uint32 type;
     SDL_KeyboardEvent key;
-    SDL_WindowEvent window;
 } SDL_Event;
 
 #define SDL_INIT_VIDEO 0x00000020u
 #define SDL_QUIT 0x00000100u
 #define SDL_KEYDOWN 0x00000300u
-#define SDL_WINDOWEVENT 0x00000200u
-#define SDL_WINDOWEVENT_SIZE_CHANGED 0x05u
+#define SDL_KEYUP 0x00000301u
 
 #define SDLK_ESCAPE 27
 #define SDLK_w 'w'
@@ -59,8 +52,6 @@ typedef struct SDL_Event {
 #define SDLK_s 's'
 #define SDLK_d 'd'
 #define SDLK_q 'q'
-#define SDLK_p 'p'
-#define SDLK_SPACE ' '
 
 #define SDL_WINDOWPOS_CENTERED 0
 #define SDL_WINDOW_RESIZABLE 0x00000020u
@@ -68,8 +59,6 @@ typedef struct SDL_Event {
 #define SDL_RENDERER_SOFTWARE 0x00000001u
 #define SDL_RENDERER_ACCELERATED 0x00000002u
 
-Uint64 SDL_GetPerformanceCounter(void);
-Uint64 SDL_GetPerformanceFrequency(void);
 void SDL_Delay(Uint32 ms);
 
 int SDL_Init(Uint32 flags);
@@ -87,6 +76,7 @@ void SDL_SetWindowTitle(SDL_Window* window, const char* title);
 int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 int SDL_RenderClear(SDL_Renderer* renderer);
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);
+int SDL_RenderDrawLines(SDL_Renderer* renderer, const SDL_Point* points, int count);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 #else
 #error "SDL2 header not found. Install SDL2 dev package and set SDL2_CFLAGS in Makefile."
@@ -97,23 +87,28 @@ void SDL_RenderPresent(SDL_Renderer* renderer);
 #endif
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#else
+#include <time.h>
 #endif
 
-typedef struct Input {
-    int dummy;
-} Input;
+typedef struct AppConfig {
+    int width;
+    int height;
+    int boidCount;
+    int threads;
+    int stepsPerSecond;
+    bool benchmarkOnly;
+    bool liveBenchmarkSession;
+    int benchmarkSteps;
+} AppConfig;
 
-typedef struct InputState {
-    bool up;
-    bool down;
-    bool left;
-    bool right;
-    bool toggle;
-    bool pauseToggle;
-    bool quit;
-} InputState;
+typedef struct Input {
+    InputState held;
+} Input;
 
 typedef struct Renderer {
     SDL_Window* window;
@@ -125,7 +120,7 @@ typedef struct Renderer {
 typedef struct BenchmarkResult {
     double totalMs;
     double avgMs;
-    double stepsPerSecond;
+    double ticksPerSecond;
 } BenchmarkResult;
 
 typedef struct LiveBenchmarkState {
@@ -135,15 +130,17 @@ typedef struct LiveBenchmarkState {
     double speedup;
     double runtimeSec;
     double liveAvgMs;
-    double liveStepsPerSecond;
+    double liveTicksPerSecond;
+    double totalMsSum;
+    int totalTickCount;
     uint64_t startUs;
     uint64_t lastUpdateUs;
     double intervalMsSum;
-    int intervalStepCount;
+    int intervalTickCount;
 } LiveBenchmarkState;
 
 enum {
-    BENCHMARK_WARMUP_STEPS = 100,
+    BENCHMARK_WARMUP_TICKS = 100,
 };
 
 static FILE* g_benchmarkLog = NULL;
@@ -170,8 +167,19 @@ static uint64_t time_now_us(void) {
     QueryPerformanceCounter(&now);
     return (uint64_t)((now.QuadPart * 1000000ULL) / (uint64_t)freq.QuadPart);
 #else
-    return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
 #endif
+}
+
+static void time_sleep_us(uint64_t us) {
+    Uint32 ms;
+
+    if (us == 0) return;
+    ms = (Uint32)(us / 1000ULL);
+    if (ms == 0) ms = 1;
+    SDL_Delay(ms);
 }
 
 static bool exe_name_is_benchmark(const char* exePath) {
@@ -193,7 +201,7 @@ static bool benchmark_open_log_file(void) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     snprintf(g_benchmarkLogPath, sizeof(g_benchmarkLogPath),
-             "life_openmp_benchmark_%04u%02u%02u_%02u%02u%02u.txt",
+             "boids_openmp_benchmark_%04u%02u%02u_%02u%02u%02u.txt",
              (unsigned)st.wYear,
              (unsigned)st.wMonth,
              (unsigned)st.wDay,
@@ -201,7 +209,7 @@ static bool benchmark_open_log_file(void) {
              (unsigned)st.wMinute,
              (unsigned)st.wSecond);
 #else
-    snprintf(g_benchmarkLogPath, sizeof(g_benchmarkLogPath), "life_openmp_benchmark_last.txt");
+    snprintf(g_benchmarkLogPath, sizeof(g_benchmarkLogPath), "boids_openmp_benchmark_last.txt");
 #endif
 
     g_benchmarkLog = fopen(g_benchmarkLogPath, "w");
@@ -254,40 +262,33 @@ static void benchmark_attach_console(void) {
 }
 
 static void print_usage(const char* exe) {
-    printf("Usage: %s [--width W] [--height H] [--threads N]\n", exe);
-    printf("       %s --benchmark N [--compare] [--width W] [--height H] [--threads N]\n", exe);
+    printf("Usage: %s [--width W] [--height H] [--boids N] [--threads N]\n", exe);
+    printf("       %s --benchmark N [--compare] [--width W] [--height H] [--boids N] [--threads N]\n", exe);
 }
 
 static void input_init(Input* input) {
-    (void)input;
+    memset(input, 0, sizeof(*input));
 }
 
 static InputState input_poll(Input* input) {
-    InputState st = {0};
     SDL_Event e;
-
-    (void)input;
 
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) {
-            st.quit = true;
-        } else if (e.type == SDL_KEYDOWN) {
+            input->held.quit = true;
+        } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
+            const bool down = e.type == SDL_KEYDOWN;
             SDL_Keycode key = e.key.keysym.sym;
-            if (key == SDLK_ESCAPE || key == SDLK_q) st.quit = true;
-            if (key == SDLK_w) st.up = true;
-            if (key == SDLK_s) st.down = true;
-            if (key == SDLK_a) st.left = true;
-            if (key == SDLK_d) st.right = true;
-            if (key == SDLK_SPACE || key == ' ') st.toggle = true;
-            if (key == SDLK_p || key == 'p' || key == 'P') st.pauseToggle = true;
+
+            if ((key == SDLK_ESCAPE || key == SDLK_q) && down) input->held.quit = true;
+            if (key == SDLK_w) input->held.up = down;
+            if (key == SDLK_s) input->held.down = down;
+            if (key == SDLK_a) input->held.left = down;
+            if (key == SDLK_d) input->held.right = down;
         }
     }
 
-    return st;
-}
-
-static int life_idx(const Life* life, int x, int y) {
-    return y * life->width + x;
+    return input->held;
 }
 
 static void draw_rect_outline(SDL_Renderer* renderer, int x, int y, int w, int h) {
@@ -303,12 +304,65 @@ static void draw_rect_filled(SDL_Renderer* renderer, int x, int y, int w, int h)
     }
 }
 
-static void renderer_update_metrics(Renderer* r) {
-    SDL_GetWindowSize(r->window, &r->winW, &r->winH);
+static void renderer_update_metrics(Renderer* renderer) {
+    SDL_GetWindowSize(renderer->window, &renderer->winW, &renderer->winH);
 }
 
-static void renderer_update_title(Renderer* r,
-                                  bool running,
+static void set_group_color(SDL_Renderer* renderer, const Boid* boid) {
+    static const unsigned char palette[][3] = {
+        {120, 200, 255},
+        {255, 160, 120},
+        {170, 230, 120},
+        {255, 220, 120},
+        {210, 170, 255},
+        {120, 240, 210},
+        {255, 130, 190},
+        {190, 190, 255},
+    };
+    const size_t paletteCount = sizeof(palette) / sizeof(palette[0]);
+    size_t index = (size_t)(boid->group % (unsigned char)paletteCount);
+
+    if (boid->predator) {
+        SDL_SetRenderDrawColor(renderer, 240, 90, 90, 255);
+        return;
+    }
+
+    SDL_SetRenderDrawColor(renderer,
+                           palette[index][0],
+                           palette[index][1],
+                           palette[index][2],
+                           255);
+}
+
+static Vec2 normalize_or_default(Vec2 v, Vec2 fallback) {
+    float len = sqrtf(v.x * v.x + v.y * v.y);
+    if (len < 1e-4f) return fallback;
+    return (Vec2){v.x / len, v.y / len};
+}
+
+static void draw_triangle_boid(SDL_Renderer* renderer, float px, float py, Vec2 dir, float size) {
+    Vec2 forward = normalize_or_default(dir, (Vec2){1.0f, 0.0f});
+    float sideX = -forward.y;
+    float sideY = forward.x;
+    float headX = px + forward.x * size;
+    float headY = py + forward.y * size;
+    float baseX = px - forward.x * (size * 0.7f);
+    float baseY = py - forward.y * (size * 0.7f);
+    float leftX = baseX + sideX * (size * 0.6f);
+    float leftY = baseY + sideY * (size * 0.6f);
+    float rightX = baseX - sideX * (size * 0.6f);
+    float rightY = baseY - sideY * (size * 0.6f);
+    SDL_Point pts[4];
+
+    pts[0] = (SDL_Point){(int)(headX + 0.5f), (int)(headY + 0.5f)};
+    pts[1] = (SDL_Point){(int)(leftX + 0.5f), (int)(leftY + 0.5f)};
+    pts[2] = (SDL_Point){(int)(rightX + 0.5f), (int)(rightY + 0.5f)};
+    pts[3] = pts[0];
+    SDL_RenderDrawLines(renderer, pts, 4);
+}
+
+static void renderer_update_title(Renderer* renderer,
+                                  const World* world,
                                   int threads,
                                   double stepMs,
                                   const LiveBenchmarkState* bm) {
@@ -316,9 +370,8 @@ static void renderer_update_title(Renderer* r,
 
     if (bm && bm->active) {
         snprintf(title, sizeof(title),
-                 "Game of Life | OpenMP threads=%d | %s | step=%.3f ms | seq=%.3f | omp=%.3f | speedup=%.2fx | live=%.3f ms/step",
+                 "Boids | OpenMP threads=%d | tick=%.3f ms | seq=%.3f | omp=%.3f | speedup=%.2fx | live=%.3f ms/tick",
                  threads,
-                 running ? "RUN" : "PAUSE",
                  stepMs,
                  bm->seqAvgMs,
                  bm->ompAvgMs,
@@ -326,155 +379,150 @@ static void renderer_update_title(Renderer* r,
                  bm->liveAvgMs);
     } else {
         snprintf(title, sizeof(title),
-                 "Game of Life | OpenMP threads=%d | %s | step=%.3f ms | WASD move | SPACE toggle | P pause | Q quit",
+                 "Boids | OpenMP boids=%zu | threads=%d | tick=%.3f ms | WASD move | Q quit",
+                 world->boidCount,
                  threads,
-                 running ? "RUN" : "PAUSE",
                  stepMs);
     }
 
-    SDL_SetWindowTitle(r->window, title);
+    SDL_SetWindowTitle(renderer->window, title);
 }
 
-static bool renderer_init(Renderer* r, int width, int height) {
+static bool renderer_init(Renderer* renderer, int width, int height) {
     int winW = width * 12;
     int winH = height * 12;
 
-    memset(r, 0, sizeof(*r));
+    memset(renderer, 0, sizeof(*renderer));
 
     if (winW < 720) winW = 720;
     if (winH < 520) winH = 520;
 
-    r->window = SDL_CreateWindow("Game of Life | OpenMP",
-                                 SDL_WINDOWPOS_CENTERED,
-                                 SDL_WINDOWPOS_CENTERED,
-                                 winW,
-                                 winH,
-                                 SDL_WINDOW_RESIZABLE);
-    if (!r->window) {
+    renderer->window = SDL_CreateWindow("Boids | OpenMP",
+                                        SDL_WINDOWPOS_CENTERED,
+                                        SDL_WINDOWPOS_CENTERED,
+                                        winW,
+                                        winH,
+                                        SDL_WINDOW_RESIZABLE);
+    if (!renderer->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
     }
 
-    r->renderer = SDL_CreateRenderer(r->window, -1, SDL_RENDERER_ACCELERATED);
-    if (!r->renderer) {
-        r->renderer = SDL_CreateRenderer(r->window, -1, SDL_RENDERER_SOFTWARE);
+    renderer->renderer = SDL_CreateRenderer(renderer->window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer->renderer) {
+        renderer->renderer = SDL_CreateRenderer(renderer->window, -1, SDL_RENDERER_SOFTWARE);
     }
-    if (!r->renderer) {
+    if (!renderer->renderer) {
         fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(r->window);
-        r->window = NULL;
+        SDL_DestroyWindow(renderer->window);
+        renderer->window = NULL;
         return false;
     }
 
-    renderer_update_metrics(r);
+    renderer_update_metrics(renderer);
     return true;
 }
 
-static void renderer_shutdown(Renderer* r) {
-    if (r->renderer) SDL_DestroyRenderer(r->renderer);
-    if (r->window) SDL_DestroyWindow(r->window);
-    memset(r, 0, sizeof(*r));
+static void renderer_shutdown(Renderer* renderer) {
+    if (renderer->renderer) SDL_DestroyRenderer(renderer->renderer);
+    if (renderer->window) SDL_DestroyWindow(renderer->window);
+    memset(renderer, 0, sizeof(*renderer));
 }
 
-static void renderer_draw(Renderer* r,
-                          const Life* life,
-                          int cursorX,
-                          int cursorY,
-                          bool running,
-                          int threads,
-                          double stepMs,
-                          const LiveBenchmarkState* bm) {
+static void renderer_draw_world(Renderer* renderer,
+                                const World* world,
+                                Vec2 playerDir,
+                                double stepMs,
+                                int threads,
+                                const LiveBenchmarkState* bm) {
     int cellSize;
     int boardW;
     int boardH;
     int offsetX;
     int offsetY;
+    float triSize;
 
-    renderer_update_metrics(r);
-    renderer_update_title(r, running, threads, stepMs, bm);
+    renderer_update_metrics(renderer);
+    renderer_update_title(renderer, world, threads, stepMs, bm);
 
-    cellSize = r->winW / life->width;
-    if (r->winH / life->height < cellSize) cellSize = r->winH / life->height;
+    cellSize = renderer->winW / world->width;
+    if (renderer->winH / world->height < cellSize) cellSize = renderer->winH / world->height;
     if (cellSize < 2) cellSize = 2;
 
-    boardW = cellSize * life->width;
-    boardH = cellSize * life->height;
-    offsetX = (r->winW - boardW) / 2;
-    offsetY = (r->winH - boardH) / 2;
+    boardW = cellSize * world->width;
+    boardH = cellSize * world->height;
+    offsetX = (renderer->winW - boardW) / 2;
+    offsetY = (renderer->winH - boardH) / 2;
+    triSize = 0.6f * (float)cellSize;
+    if (triSize < 4.0f) triSize = 4.0f;
+    if (triSize > 14.0f) triSize = 14.0f;
 
-    SDL_SetRenderDrawColor(r->renderer, 18, 20, 24, 255);
-    SDL_RenderClear(r->renderer);
+    SDL_SetRenderDrawColor(renderer->renderer, 18, 20, 24, 255);
+    SDL_RenderClear(renderer->renderer);
 
-    SDL_SetRenderDrawColor(r->renderer, 28, 32, 40, 255);
-    draw_rect_filled(r->renderer, offsetX, offsetY, boardW, boardH);
+    SDL_SetRenderDrawColor(renderer->renderer, 30, 34, 42, 255);
+    draw_rect_filled(renderer->renderer, offsetX, offsetY, boardW, boardH);
 
-    for (int y = 0; y < life->height; y++) {
-        for (int x = 0; x < life->width; x++) {
-            if (!life->a[life_idx(life, x, y)]) continue;
+    for (size_t i = 0; i < world->boidCount; i++) {
+        const Boid* boid = &world->boids[i];
+        float px;
+        float py;
 
-            SDL_SetRenderDrawColor(r->renderer, 160, 220, 120, 255);
-            draw_rect_filled(r->renderer,
-                             offsetX + x * cellSize + 1,
-                             offsetY + y * cellSize + 1,
-                             cellSize - 2,
-                             cellSize - 2);
-        }
+        if (!boid->alive) continue;
+
+        set_group_color(renderer->renderer, boid);
+        px = (float)offsetX + boid->pos.x * (float)cellSize;
+        py = (float)offsetY + boid->pos.y * (float)cellSize;
+        draw_triangle_boid(renderer->renderer, px, py, boid->vel, triSize);
     }
 
-    SDL_SetRenderDrawColor(r->renderer, running ? 255 : 220, running ? 186 : 90, 70, 255);
-    draw_rect_outline(r->renderer,
-                      offsetX + cursorX * cellSize,
-                      offsetY + cursorY * cellSize,
-                      cellSize,
-                      cellSize);
+    SDL_SetRenderDrawColor(renderer->renderer, 255, 255, 255, 255);
+    draw_triangle_boid(renderer->renderer,
+                       (float)offsetX + world->player.pos.x * (float)cellSize,
+                       (float)offsetY + world->player.pos.y * (float)cellSize,
+                       playerDir,
+                       triSize);
 
-    SDL_SetRenderDrawColor(r->renderer, 90, 96, 110, 255);
-    draw_rect_outline(r->renderer, offsetX, offsetY, boardW, boardH);
-    SDL_RenderPresent(r->renderer);
+    SDL_SetRenderDrawColor(renderer->renderer, 90, 96, 110, 255);
+    draw_rect_outline(renderer->renderer, offsetX, offsetY, boardW, boardH);
+    SDL_RenderPresent(renderer->renderer);
 }
 
-static bool setup_life_for_run(Life* life, const AppConfig* cfg) {
-    int cursorX;
-    int cursorY;
-
-    if (!life_init(life, cfg->width, cfg->height)) {
-        return false;
-    }
-
-    cursorX = cfg->width / 2;
-    cursorY = cfg->height / 2;
-    life_seed_glider(life, cursorX, cursorY);
-    return true;
+static bool setup_world_for_run(World* world, const AppConfig* cfg, unsigned int seed) {
+    srand(seed);
+    return world_init(world, cfg->width, cfg->height, (size_t)cfg->boidCount);
 }
 
-static BenchmarkResult run_benchmark_steps(const AppConfig* cfg, bool parallel) {
+static BenchmarkResult run_benchmark_ticks(const AppConfig* cfg, bool parallel) {
     BenchmarkResult result = {0};
-    Life life;
+    World world;
+    const double dt = 1.0 / (double)cfg->stepsPerSecond;
 
-    if (!setup_life_for_run(&life, cfg)) {
+    if (!setup_world_for_run(&world, cfg, 1234u)) {
         return result;
     }
 
-    for (int i = 0; i < BENCHMARK_WARMUP_STEPS; i++) {
+    for (int i = 0; i < BENCHMARK_WARMUP_TICKS; i++) {
         if (parallel) {
-            (void)life_step_openmp(&life, cfg->threads);
+            (void)world_step_openmp(&world, cfg->threads, dt);
         } else {
-            (void)life_step_seq(&life);
+            (void)world_step_seq(&world, dt);
         }
     }
 
     for (int i = 0; i < cfg->benchmarkSteps; i++) {
-        result.totalMs += parallel ? life_step_openmp(&life, cfg->threads) : life_step_seq(&life);
+        result.totalMs += parallel ? world_step_openmp(&world, cfg->threads, dt)
+                                   : world_step_seq(&world, dt);
     }
 
     if (cfg->benchmarkSteps > 0) {
         result.avgMs = result.totalMs / (double)cfg->benchmarkSteps;
     }
     if (result.totalMs > 0.0) {
-        result.stepsPerSecond = (double)cfg->benchmarkSteps * 1000.0 / result.totalMs;
+        result.ticksPerSecond = (double)cfg->benchmarkSteps * 1000.0 / result.totalMs;
     }
 
-    life_destroy(&life);
+    world_destroy(&world);
     return result;
 }
 
@@ -484,8 +532,8 @@ static bool run_compare_benchmark(const AppConfig* cfg, LiveBenchmarkState* bm) 
 
     if (cfg->benchmarkSteps <= 0) return false;
 
-    seqResult = run_benchmark_steps(cfg, false);
-    ompResult = run_benchmark_steps(cfg, true);
+    seqResult = run_benchmark_ticks(cfg, false);
+    ompResult = run_benchmark_ticks(cfg, true);
 
     if (seqResult.avgMs <= 0.0 || ompResult.avgMs <= 0.0) {
         return false;
@@ -497,87 +545,141 @@ static bool run_compare_benchmark(const AppConfig* cfg, LiveBenchmarkState* bm) 
         bm->seqAvgMs = seqResult.avgMs;
         bm->ompAvgMs = ompResult.avgMs;
         bm->speedup = seqResult.avgMs / ompResult.avgMs;
-        bm->startUs = time_now_us();
-        bm->lastUpdateUs = bm->startUs;
     }
 
-    benchmark_printf("benchmark compare section=life_step width=%d height=%d steps=%d\n",
+    benchmark_printf("benchmark compare section=boids_step width=%d height=%d boids=%d ticks=%d\n",
                      cfg->width,
                      cfg->height,
+                     cfg->boidCount,
                      cfg->benchmarkSteps);
-    benchmark_printf("  seq:      avg=%.3f ms/step | steps=%.2f/s\n", seqResult.avgMs, seqResult.stepsPerSecond);
-    benchmark_printf("  openmp(%d): avg=%.3f ms/step | steps=%.2f/s\n", cfg->threads, ompResult.avgMs, ompResult.stepsPerSecond);
-    benchmark_printf("  speedup:  %.2fx\n", seqResult.avgMs / ompResult.avgMs);
+    benchmark_printf("  seq:        avg=%.3f ms/tick | ticks=%.2f/s\n", seqResult.avgMs, seqResult.ticksPerSecond);
+    benchmark_printf("  openmp(%d): avg=%.3f ms/tick | ticks=%.2f/s\n", cfg->threads, ompResult.avgMs, ompResult.ticksPerSecond);
+    benchmark_printf("  speedup:    %.2fx\n", seqResult.avgMs / ompResult.avgMs);
     return true;
 }
 
-static void live_benchmark_note_step(LiveBenchmarkState* bm, double stepMs) {
+static void live_benchmark_note_tick(LiveBenchmarkState* bm, double stepMs) {
     if (!bm || !bm->active) return;
+
     bm->intervalMsSum += stepMs;
-    bm->intervalStepCount++;
+    bm->intervalTickCount++;
+    bm->totalMsSum += stepMs;
+    bm->totalTickCount++;
 }
 
-static void live_benchmark_update(LiveBenchmarkState* bm) {
+static void live_benchmark_log_if_needed(const AppConfig* cfg,
+                                         const World* world,
+                                         LiveBenchmarkState* bm,
+                                         bool force) {
     uint64_t nowUs;
+    uint64_t intervalUs;
     double intervalSec;
+    double overallAvgMs = 0.0;
 
     if (!bm || !bm->active) return;
 
     nowUs = time_now_us();
     bm->runtimeSec = (double)(nowUs - bm->startUs) / 1000000.0;
 
-    if (nowUs - bm->lastUpdateUs < 1000000ULL) return;
+    intervalUs = nowUs - bm->lastUpdateUs;
+    if (!force && intervalUs < 1000000ULL) return;
+    if (bm->intervalTickCount <= 0) return;
 
-    intervalSec = (double)(nowUs - bm->lastUpdateUs) / 1000000.0;
-    if (bm->intervalStepCount > 0) {
-        bm->liveAvgMs = bm->intervalMsSum / (double)bm->intervalStepCount;
-        bm->liveStepsPerSecond = (double)bm->intervalStepCount / intervalSec;
+    intervalSec = (double)intervalUs / 1000000.0;
+    if (intervalSec > 0.0) {
+        bm->liveAvgMs = bm->intervalMsSum / (double)bm->intervalTickCount;
+        bm->liveTicksPerSecond = (double)bm->intervalTickCount / intervalSec;
     }
 
+    if (bm->totalTickCount > 0) {
+        overallAvgMs = bm->totalMsSum / (double)bm->totalTickCount;
+    }
+
+    benchmark_printf("[live %.1fs] run=openmp boids=%zu threads=%d interval=%.3f ms/tick overall=%.3f ms/tick ticks=%.2f/s\n",
+                     bm->runtimeSec,
+                     world ? world->boidCount : (size_t)cfg->boidCount,
+                     cfg->threads,
+                     bm->liveAvgMs,
+                     overallAvgMs,
+                     bm->liveTicksPerSecond);
+
     bm->intervalMsSum = 0.0;
-    bm->intervalStepCount = 0;
+    bm->intervalTickCount = 0;
     bm->lastUpdateUs = nowUs;
 }
 
 static bool run_live_game(const AppConfig* cfg, LiveBenchmarkState* bm) {
-    Life life;
-    Renderer r;
-    Input in;
-    int cursorX = cfg->width / 2;
-    int cursorY = cfg->height / 2;
-    bool running = true;
+    World world;
+    Renderer renderer;
+    Input input;
+    Vec2 playerDir = {1.0f, 0.0f};
+    const double dt = 1.0 / (double)cfg->stepsPerSecond;
+    unsigned int seed = bm && bm->active ? 1234u : (unsigned int)(time_now_us() & 0xffffffffu);
 
-    if (!setup_life_for_run(&life, cfg)) {
-        fprintf(stderr, "life_init failed\n");
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
 
-    renderer_init(&r, cfg->width, cfg->height);
-    input_init(&in);
-
-    while (true) {
-        InputState st = input_poll(&in);
-        double stepMs = 0.0;
-
-        if (st.quit) break;
-        if (st.pauseToggle) running = !running;
-        if (st.left && cursorX > 0) cursorX--;
-        if (st.right && cursorX < cfg->width - 1) cursorX++;
-        if (st.up && cursorY > 0) cursorY--;
-        if (st.down && cursorY < cfg->height - 1) cursorY++;
-        if (st.toggle) life_toggle(&life, cursorX, cursorY);
-
-        if (running) {
-            stepMs = life_step_openmp(&life, cfg->threads);
-            live_benchmark_note_step(bm, stepMs);
-        }
-
-        live_benchmark_update(bm);
-        renderer_draw(&r, &life, cursorX, cursorY, running, cfg->threads, stepMs, bm);
+    if (!setup_world_for_run(&world, cfg, seed)) {
+        fprintf(stderr, "world_init failed\n");
+        SDL_Quit();
+        return false;
     }
 
-    renderer_shutdown(&r);
-    life_destroy(&life);
+    if (!renderer_init(&renderer, cfg->width, cfg->height)) {
+        world_destroy(&world);
+        SDL_Quit();
+        return false;
+    }
+
+    input_init(&input);
+
+    if (bm && bm->active) {
+        bm->startUs = time_now_us();
+        bm->lastUpdateUs = bm->startUs;
+        bm->intervalMsSum = 0.0;
+        bm->intervalTickCount = 0;
+        bm->totalMsSum = 0.0;
+        bm->totalTickCount = 0;
+        bm->runtimeSec = 0.0;
+        bm->liveAvgMs = 0.0;
+        bm->liveTicksPerSecond = 0.0;
+
+        benchmark_printf("interactive benchmark start run=openmp boids=%zu threads=%d\n",
+                         world.boidCount,
+                         cfg->threads);
+    }
+
+    while (true) {
+        InputState st = input_poll(&input);
+        double stepMs;
+        Vec2 moveDir = {0.0f, 0.0f};
+
+        if (st.quit) break;
+
+        if (st.up) moveDir.y -= 1.0f;
+        if (st.down) moveDir.y += 1.0f;
+        if (st.left) moveDir.x -= 1.0f;
+        if (st.right) moveDir.x += 1.0f;
+        if (moveDir.x != 0.0f || moveDir.y != 0.0f) {
+            playerDir = moveDir;
+        }
+
+        world_apply_player_input(&world, &st, dt);
+        stepMs = world_step_openmp(&world, cfg->threads, dt);
+
+        live_benchmark_note_tick(bm, stepMs);
+        live_benchmark_log_if_needed(cfg, &world, bm, false);
+        renderer_draw_world(&renderer, &world, playerDir, stepMs, cfg->threads, bm);
+        time_sleep_us((uint64_t)(dt * 1000000.0));
+    }
+
+    live_benchmark_log_if_needed(cfg, &world, bm, true);
+
+    renderer_shutdown(&renderer);
+    world_destroy(&world);
+    SDL_Quit();
     return true;
 }
 
@@ -585,10 +687,11 @@ static bool run_live_game(const AppConfig* cfg, LiveBenchmarkState* bm) {
 enum {
     STARTUP_ID_WIDTH = 1001,
     STARTUP_ID_HEIGHT = 1002,
-    STARTUP_ID_THREADS = 1003,
-    STARTUP_ID_STEPS = 1004,
-    STARTUP_ID_START = 1005,
-    STARTUP_ID_CANCEL = 1006,
+    STARTUP_ID_BOIDS = 1003,
+    STARTUP_ID_THREADS = 1004,
+    STARTUP_ID_STEPS = 1005,
+    STARTUP_ID_START = 1006,
+    STARTUP_ID_CANCEL = 1007,
 };
 
 typedef struct StartupPromptState {
@@ -597,6 +700,7 @@ typedef struct StartupPromptState {
     bool accepted;
     HWND widthEdit;
     HWND heightEdit;
+    HWND boidsEdit;
     HWND threadsEdit;
     HWND stepsEdit;
 } StartupPromptState;
@@ -630,6 +734,7 @@ static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
 
     next.width = startup_read_edit_int(state->widthEdit, next.width);
     next.height = startup_read_edit_int(state->heightEdit, next.height);
+    next.boidCount = startup_read_edit_int(state->boidsEdit, next.boidCount);
     next.threads = startup_read_edit_int(state->threadsEdit, next.threads);
     next.benchmarkOnly = false;
     next.liveBenchmarkSession = false;
@@ -639,12 +744,13 @@ static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
         next.liveBenchmarkSession = true;
     }
 
-    if (next.width <= 5 || next.height <= 5 || next.threads <= 0) {
-        MessageBoxA(hwnd, "A meretek legyenek ervenyesek, a szalak szama legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
+    if (next.width <= 5 || next.height <= 5 || next.boidCount <= 0 || next.threads <= 0) {
+        MessageBoxA(hwnd, "A meretek legyenek ervenyesek, a boid es a szal szam legyen pozitiv.",
+                    "Hibas adat", MB_ICONERROR | MB_OK);
         return false;
     }
     if (state->benchmarkPrompt && next.benchmarkSteps <= 0) {
-        MessageBoxA(hwnd, "Az osszevetesi lepesek szama legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
+        MessageBoxA(hwnd, "Az osszevetesi tickek szama legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -669,34 +775,39 @@ static LRESULT CALLBACK startup_prompt_proc(HWND hwnd, UINT msg, WPARAM wParam, 
 
         state = (StartupPromptState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
         startup_create_label(hwnd,
-                             state->benchmarkPrompt ? "Add meg a meresi inditasi adatokat." : "Add meg a jatek inditasi adatait.",
-                             18, y, 320, 18);
+                             state->benchmarkPrompt ? "Add meg a meresi inditasi adatokat." : "Add meg a boids inditasi adatait.",
+                             18, y, 340, 18);
         y += 32;
 
         startup_create_label(hwnd, "Szelesseg:", 18, y + 3, 120, 20);
         snprintf(buffer, sizeof(buffer), "%d", state->cfg->width);
-        state->widthEdit = startup_create_edit(hwnd, STARTUP_ID_WIDTH, buffer, 150, y, 140, 24);
+        state->widthEdit = startup_create_edit(hwnd, STARTUP_ID_WIDTH, buffer, 170, y, 140, 24);
         y += 34;
 
         startup_create_label(hwnd, "Magassag:", 18, y + 3, 120, 20);
         snprintf(buffer, sizeof(buffer), "%d", state->cfg->height);
-        state->heightEdit = startup_create_edit(hwnd, STARTUP_ID_HEIGHT, buffer, 150, y, 140, 24);
+        state->heightEdit = startup_create_edit(hwnd, STARTUP_ID_HEIGHT, buffer, 170, y, 140, 24);
+        y += 34;
+
+        startup_create_label(hwnd, "Boid darab:", 18, y + 3, 120, 20);
+        snprintf(buffer, sizeof(buffer), "%d", state->cfg->boidCount);
+        state->boidsEdit = startup_create_edit(hwnd, STARTUP_ID_BOIDS, buffer, 170, y, 140, 24);
         y += 34;
 
         startup_create_label(hwnd, "Szalak szama:", 18, y + 3, 120, 20);
         snprintf(buffer, sizeof(buffer), "%d", state->cfg->threads);
-        state->threadsEdit = startup_create_edit(hwnd, STARTUP_ID_THREADS, buffer, 150, y, 140, 24);
+        state->threadsEdit = startup_create_edit(hwnd, STARTUP_ID_THREADS, buffer, 170, y, 140, 24);
         y += 34;
 
         if (state->benchmarkPrompt) {
-            startup_create_label(hwnd, "Osszevetesi lepesek:", 18, y + 3, 120, 20);
+            startup_create_label(hwnd, "Osszevetesi tickek:", 18, y + 3, 120, 20);
             snprintf(buffer, sizeof(buffer), "%d", state->cfg->benchmarkSteps > 0 ? state->cfg->benchmarkSteps : 500);
-            state->stepsEdit = startup_create_edit(hwnd, STARTUP_ID_STEPS, buffer, 150, y, 140, 24);
+            state->stepsEdit = startup_create_edit(hwnd, STARTUP_ID_STEPS, buffer, 170, y, 140, 24);
             y += 34;
         }
 
-        startup_create_button(hwnd, STARTUP_ID_START, "Inditas", 70, y + 10, 90, 28);
-        startup_create_button(hwnd, STARTUP_ID_CANCEL, "Megse", 180, y + 10, 90, 28);
+        startup_create_button(hwnd, STARTUP_ID_START, "Inditas", 82, y + 10, 90, 28);
+        startup_create_button(hwnd, STARTUP_ID_CANCEL, "Megse", 192, y + 10, 90, 28);
         return 0;
     }
     case WM_COMMAND:
@@ -725,7 +836,7 @@ static LRESULT CALLBACK startup_prompt_proc(HWND hwnd, UINT msg, WPARAM wParam, 
 
 static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
     static bool classRegistered = false;
-    const char* className = "LifeOpenMpStartupPromptWindow";
+    const char* className = "BoidsOpenMpStartupPromptWindow";
     StartupPromptState state;
     WNDCLASSA wc;
     RECT clientRect;
@@ -759,8 +870,8 @@ static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
 
     clientRect.left = 0;
     clientRect.top = 0;
-    clientRect.right = 340;
-    clientRect.bottom = benchmarkPrompt ? 220 : 190;
+    clientRect.right = 360;
+    clientRect.bottom = benchmarkPrompt ? 286 : 252;
     AdjustWindowRectEx(&clientRect, windowStyle, FALSE, windowExStyle);
     width = clientRect.right - clientRect.left;
     height = clientRect.bottom - clientRect.top;
@@ -769,7 +880,7 @@ static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
 
     hwnd = CreateWindowExA(windowExStyle,
                            className,
-                           benchmarkPrompt ? "OpenMP meres inditas" : "OpenMP jatek inditas",
+                           benchmarkPrompt ? "OpenMP boids meres inditas" : "OpenMP boids inditas",
                            windowStyle | WS_VISIBLE,
                            x, y, width, height,
                            NULL, NULL, GetModuleHandleA(NULL), &state);
@@ -795,7 +906,9 @@ int main(int argc, char** argv) {
     AppConfig cfg = {
         .width = 80,
         .height = 25,
+        .boidCount = 200,
         .threads = 4,
+        .stepsPerSecond = 30,
         .benchmarkOnly = false,
         .liveBenchmarkSession = false,
         .benchmarkSteps = 0,
@@ -810,6 +923,7 @@ int main(int argc, char** argv) {
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) cfg.width = parse_int(argv[++i], cfg.width);
             else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) cfg.height = parse_int(argv[++i], cfg.height);
+            else if (strcmp(argv[i], "--boids") == 0 && i + 1 < argc) cfg.boidCount = parse_int(argv[++i], cfg.boidCount);
             else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) cfg.threads = parse_int(argv[++i], cfg.threads);
             else if (strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
                 cfg.benchmarkOnly = true;
@@ -827,12 +941,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (cfg.width <= 5 || cfg.height <= 5 || cfg.threads <= 0) {
+    if (cfg.width <= 5 || cfg.height <= 5 || cfg.boidCount <= 0 || cfg.threads <= 0) {
         fprintf(stderr, "Invalid config. Use --help\n");
         return 2;
     }
     if (cfg.benchmarkOnly && cfg.benchmarkSteps <= 0) {
-        fprintf(stderr, "Benchmark mode needs a positive step count. Use --benchmark N\n");
+        fprintf(stderr, "Benchmark mode needs a positive tick count. Use --benchmark N\n");
         return 2;
     }
 
@@ -850,11 +964,16 @@ int main(int argc, char** argv) {
     if (cfg.liveBenchmarkSession) {
         LiveBenchmarkState bm;
         bool ok = run_compare_benchmark(&cfg, &bm) && run_live_game(&cfg, &bm);
+        double overallAvgMs = 0.0;
 
-        benchmark_printf("interactive benchmark end runtime=%.1fs avg=%.3f ms/step steps=%.2f/s log=%s\n",
+        if (bm.totalTickCount > 0) {
+            overallAvgMs = bm.totalMsSum / (double)bm.totalTickCount;
+        }
+
+        benchmark_printf("interactive benchmark end runtime=%.1fs avg=%.3f ms/tick ticks=%.2f/s log=%s\n",
                          bm.runtimeSec,
-                         bm.liveAvgMs,
-                         bm.liveStepsPerSecond,
+                         overallAvgMs,
+                         bm.liveTicksPerSecond,
                          benchmark_log_path() ? benchmark_log_path() : "-");
         benchmark_close_log_file();
         return ok ? 0 : 1;

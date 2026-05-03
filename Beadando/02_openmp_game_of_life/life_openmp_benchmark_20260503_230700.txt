@@ -1,4 +1,0 @@
-benchmark compare section=life_step width=80 height=25 steps=50
-  seq:      avg=0.017 ms/step | steps=59171.60/s
-  openmp(4): avg=0.016 ms/step | steps=62656.64/s
-  speedup:  1.06x

@@ -10,10 +10,10 @@ CPPFLAGS+=$(SDL2_CFLAGS)
 
 SRC=$(wildcard src/*.c)
 OBJ=$(SRC:.c=.o)
-BIN=life_openmp.exe
-BENCH_BIN=life_openmp_benchmark.exe
+BIN=boids_openmp.exe
+BENCH_BIN=boids_openmp_benchmark.exe
 
-all: $(BIN)
+all: $(BIN) $(BENCH_BIN)
 
 benchmark: $(BENCH_BIN)
 
@@ -27,7 +27,7 @@ src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 run: $(BIN)
-	./$(BIN) --threads 4 --width 80 --height 25
+	./$(BIN) --threads 4 --boids 200 --width 80 --height 25
 
 clean:
-	-del /Q src\*.o $(BIN) $(BENCH_BIN) 2>nul
+	-del /Q src\*.o $(BIN) $(BENCH_BIN) life_openmp.exe life_openmp_benchmark.exe 2>nul
