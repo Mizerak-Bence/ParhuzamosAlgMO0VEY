@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #if defined(__has_include)
 #if __has_include(<SDL2/SDL.h>)
@@ -698,42 +699,45 @@ typedef struct StartupPromptState {
     AppConfig* cfg;
     bool benchmarkPrompt;
     bool accepted;
-    HWND widthEdit;
-    HWND heightEdit;
     HWND boidsEdit;
     HWND threadsEdit;
     HWND stepsEdit;
 } StartupPromptState;
 
-static HWND startup_create_label(HWND parent, const char* text, int x, int y, int w, int h) {
-    return CreateWindowExA(0, "STATIC", text, WS_CHILD | WS_VISIBLE,
-                           x, y, w, h, parent, NULL, GetModuleHandleA(NULL), NULL);
+static HWND startup_create_label(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE,
+                           x, y, w, h, parent, NULL, GetModuleHandleW(NULL), NULL);
 }
 
-static HWND startup_create_edit(HWND parent, int id, const char* text, int x, int y, int w, int h) {
-    return CreateWindowExA(0, "EDIT", text,
+static HWND startup_create_edit(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"EDIT", text,
                            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
-                           x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+                           x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
 }
 
-static HWND startup_create_button(HWND parent, int id, const char* text, int x, int y, int w, int h) {
-    return CreateWindowExA(0, "BUTTON", text,
+static HWND startup_create_button(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"BUTTON", text,
                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                           x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+                           x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
 }
 
 static int startup_read_edit_int(HWND edit, int fallbackValue) {
-    char buffer[64];
+    wchar_t buffer[64];
+    wchar_t* end = NULL;
+    long value;
+
     if (!edit) return fallbackValue;
-    GetWindowTextA(edit, buffer, (int)sizeof(buffer));
-    return parse_int(buffer, fallbackValue);
+    GetWindowTextW(edit, buffer, (int)(sizeof(buffer) / sizeof(buffer[0])));
+    if (buffer[0] == L'\0') return fallbackValue;
+
+    value = wcstol(buffer, &end, 10);
+    if (end == buffer) return fallbackValue;
+    return (int)value;
 }
 
 static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
     AppConfig next = *state->cfg;
 
-    next.width = startup_read_edit_int(state->widthEdit, next.width);
-    next.height = startup_read_edit_int(state->heightEdit, next.height);
     next.boidCount = startup_read_edit_int(state->boidsEdit, next.boidCount);
     next.threads = startup_read_edit_int(state->threadsEdit, next.threads);
     next.benchmarkOnly = false;
@@ -744,13 +748,13 @@ static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
         next.liveBenchmarkSession = true;
     }
 
-    if (next.width <= 5 || next.height <= 5 || next.boidCount <= 0 || next.threads <= 0) {
-        MessageBoxA(hwnd, "A meretek legyenek ervenyesek, a boid es a szal szam legyen pozitiv.",
-                    "Hibas adat", MB_ICONERROR | MB_OK);
+    if (next.boidCount <= 0 || next.threads <= 0) {
+        MessageBoxW(hwnd, L"A boidok és a szálak száma legyen pozitív.",
+                    L"Hibás adat", MB_ICONERROR | MB_OK);
         return false;
     }
     if (state->benchmarkPrompt && next.benchmarkSteps <= 0) {
-        MessageBoxA(hwnd, "Az osszevetesi tickek szama legyen pozitiv.", "Hibas adat", MB_ICONERROR | MB_OK);
+        MessageBoxW(hwnd, L"Az összevetési lépések száma legyen pozitív.", L"Hibás adat", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -761,53 +765,44 @@ static bool startup_collect_values(HWND hwnd, StartupPromptState* state) {
 }
 
 static LRESULT CALLBACK startup_prompt_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    StartupPromptState* state = (StartupPromptState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    StartupPromptState* state = (StartupPromptState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
     switch (msg) {
     case WM_NCCREATE: {
-        CREATESTRUCTA* cs = (CREATESTRUCTA*)lParam;
-        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        CREATESTRUCTW* cs = (CREATESTRUCTW*)lParam;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
         return TRUE;
     }
     case WM_CREATE: {
-        char buffer[32];
+        wchar_t buffer[32];
         int y = 18;
 
-        state = (StartupPromptState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        state = (StartupPromptState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         startup_create_label(hwnd,
-                             state->benchmarkPrompt ? "Add meg a meresi inditasi adatokat." : "Add meg a boids inditasi adatait.",
-                             18, y, 340, 18);
+                             state->benchmarkPrompt ? L"Add meg a mérési indítási adatokat." : L"Add meg a boids indítási adatait.",
+                             18, y, 320, 18);
         y += 32;
 
-        startup_create_label(hwnd, "Szelesseg:", 18, y + 3, 120, 20);
-        snprintf(buffer, sizeof(buffer), "%d", state->cfg->width);
-        state->widthEdit = startup_create_edit(hwnd, STARTUP_ID_WIDTH, buffer, 170, y, 140, 24);
+        startup_create_label(hwnd, L"Boid darab:", 18, y + 3, 120, 20);
+        swprintf(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%d", state->cfg->boidCount);
+        state->boidsEdit = startup_create_edit(hwnd, STARTUP_ID_BOIDS, buffer, 150, y, 140, 24);
         y += 34;
 
-        startup_create_label(hwnd, "Magassag:", 18, y + 3, 120, 20);
-        snprintf(buffer, sizeof(buffer), "%d", state->cfg->height);
-        state->heightEdit = startup_create_edit(hwnd, STARTUP_ID_HEIGHT, buffer, 170, y, 140, 24);
-        y += 34;
-
-        startup_create_label(hwnd, "Boid darab:", 18, y + 3, 120, 20);
-        snprintf(buffer, sizeof(buffer), "%d", state->cfg->boidCount);
-        state->boidsEdit = startup_create_edit(hwnd, STARTUP_ID_BOIDS, buffer, 170, y, 140, 24);
-        y += 34;
-
-        startup_create_label(hwnd, "Szalak szama:", 18, y + 3, 120, 20);
-        snprintf(buffer, sizeof(buffer), "%d", state->cfg->threads);
-        state->threadsEdit = startup_create_edit(hwnd, STARTUP_ID_THREADS, buffer, 170, y, 140, 24);
+        startup_create_label(hwnd, L"Szálak száma:", 18, y + 3, 120, 20);
+        swprintf(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%d", state->cfg->threads);
+        state->threadsEdit = startup_create_edit(hwnd, STARTUP_ID_THREADS, buffer, 150, y, 140, 24);
         y += 34;
 
         if (state->benchmarkPrompt) {
-            startup_create_label(hwnd, "Osszevetesi tickek:", 18, y + 3, 120, 20);
-            snprintf(buffer, sizeof(buffer), "%d", state->cfg->benchmarkSteps > 0 ? state->cfg->benchmarkSteps : 500);
-            state->stepsEdit = startup_create_edit(hwnd, STARTUP_ID_STEPS, buffer, 170, y, 140, 24);
+            startup_create_label(hwnd, L"Összevetési lépések:", 18, y + 3, 120, 20);
+            swprintf(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%d",
+                     state->cfg->benchmarkSteps > 0 ? state->cfg->benchmarkSteps : 500);
+            state->stepsEdit = startup_create_edit(hwnd, STARTUP_ID_STEPS, buffer, 150, y, 140, 24);
             y += 34;
         }
 
-        startup_create_button(hwnd, STARTUP_ID_START, "Inditas", 82, y + 10, 90, 28);
-        startup_create_button(hwnd, STARTUP_ID_CANCEL, "Megse", 192, y + 10, 90, 28);
+        startup_create_button(hwnd, STARTUP_ID_START, L"Indítás", 70, y + 10, 90, 28);
+        startup_create_button(hwnd, STARTUP_ID_CANCEL, L"Mégse", 180, y + 10, 90, 28);
         return 0;
     }
     case WM_COMMAND:
@@ -831,14 +826,14 @@ static LRESULT CALLBACK startup_prompt_proc(HWND hwnd, UINT msg, WPARAM wParam, 
         break;
     }
 
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
     static bool classRegistered = false;
-    const char* className = "BoidsOpenMpStartupPromptWindow";
+    const wchar_t* className = L"BoidsOpenMpStartupPromptWindow";
     StartupPromptState state;
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     RECT clientRect;
     const DWORD windowStyle = WS_CAPTION | WS_SYSMENU;
     const DWORD windowExStyle = WS_EX_DLGMODALFRAME;
@@ -854,11 +849,11 @@ static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
     if (!classRegistered) {
         memset(&wc, 0, sizeof(wc));
         wc.lpfnWndProc = startup_prompt_proc;
-        wc.hInstance = GetModuleHandleA(NULL);
+        wc.hInstance = GetModuleHandleW(NULL);
         wc.lpszClassName = className;
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        if (!RegisterClassA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
             return false;
         }
         classRegistered = true;
@@ -870,25 +865,25 @@ static bool prompt_startup_config(AppConfig* cfg, bool benchmarkPrompt) {
 
     clientRect.left = 0;
     clientRect.top = 0;
-    clientRect.right = 360;
-    clientRect.bottom = benchmarkPrompt ? 286 : 252;
+    clientRect.right = 340;
+    clientRect.bottom = benchmarkPrompt ? 210 : 180;
     AdjustWindowRectEx(&clientRect, windowStyle, FALSE, windowExStyle);
     width = clientRect.right - clientRect.left;
     height = clientRect.bottom - clientRect.top;
     x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
 
-    hwnd = CreateWindowExA(windowExStyle,
+    hwnd = CreateWindowExW(windowExStyle,
                            className,
-                           benchmarkPrompt ? "OpenMP boids meres inditas" : "OpenMP boids inditas",
+                           benchmarkPrompt ? L"OpenMP boids mérés indítás" : L"OpenMP boids indítás",
                            windowStyle | WS_VISIBLE,
                            x, y, width, height,
-                           NULL, NULL, GetModuleHandleA(NULL), &state);
+                           NULL, NULL, GetModuleHandleW(NULL), &state);
     if (!hwnd) return false;
 
-    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessageW(&msg);
     }
 
     return state.accepted;

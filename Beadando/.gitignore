@@ -11,3 +11,10 @@
 
 # local doxygen config (keep local)
 01_pthreads_boids/Doxyfile
+
+# generated benchmark logs (recreated locally)
+01_pthreads_boids/benchmark_session_*.txt
+01_pthreads_boids/benchmark_session_last.txt
+02_openmp_boids/boids_openmp_benchmark_*.txt
+02_openmp_boids/boids_openmp_benchmark_last.txt
+03_winapi_threads_boids/boids_winapi_benchmark_*.txt

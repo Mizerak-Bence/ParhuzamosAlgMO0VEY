@@ -1,8 +1,16 @@
 #include "boids.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 static float frand01(void) { return (float)rand() / (float)RAND_MAX; }
 
@@ -71,6 +79,43 @@ void world_apply_player_input(World* w, const struct InputState* in, double dt) 
         w->player.pos = v_add(w->player.pos, v_mul(d, (float)(w->player.speed * dt)));
         w->player.pos = clamp_pos(w, w->player.pos);
     }
+}
+
+double world_step_seq(World* w, double dt) {
+    uint64_t t0;
+    uint64_t t1;
+    Boid* tmp;
+
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    LARGE_INTEGER now0;
+    LARGE_INTEGER now1;
+
+    if (!init) {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+
+    QueryPerformanceCounter(&now0);
+    t0 = (uint64_t)((now0.QuadPart * 1000000ULL) / (uint64_t)freq.QuadPart);
+#else
+    t0 = 0;
+#endif
+
+    world_step_range(w, w, 0, w->boidCount, dt);
+    tmp = w->boids;
+    w->boids = w->boidsNext;
+    w->boidsNext = tmp;
+
+#ifdef _WIN32
+    QueryPerformanceCounter(&now1);
+    t1 = (uint64_t)((now1.QuadPart * 1000000ULL) / (uint64_t)freq.QuadPart);
+#else
+    t1 = t0;
+#endif
+
+    return (double)(t1 - t0) / 1000.0;
 }
 
 void world_step_range(const World* r, World* w, size_t begin, size_t end, double dt) {

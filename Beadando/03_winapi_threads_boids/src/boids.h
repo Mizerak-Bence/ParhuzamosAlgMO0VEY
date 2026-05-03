@@ -40,4 +40,6 @@ void world_destroy(World* world);
 
 void world_apply_player_input(World* world, const InputState* input, double dt);
 
+double world_step_seq(World* world, double dt);
+
 void world_step_range(const World* worldRead, World* worldWrite, size_t begin, size_t end, double dt);
