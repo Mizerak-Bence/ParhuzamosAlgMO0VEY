@@ -3,7 +3,7 @@
 ## Cél
 A boids szimuláció párhuzamosítása WinAPI thread-ekkel (`CreateThread`, `WaitForMultipleObjects` stb.).
 
-Az aktuális változat SDL2 ablakban jeleníti meg a boidokat, és a 01/02 feladatokhoz hasonloan kulon benchmark futtathatot is kap.
+Az aktuális változat SDL2 ablakban jeleníti meg a boidokat, 01-szerűbb csoportos flockinggal és külön benchmark futtatható változattal.
 
 ## Input
 - WASD: player mozgatása
@@ -27,7 +27,8 @@ Futtatás:
 ```
 Kilépés: `Q` vagy az ablak bezárása.
 
-Induláskor feljön egy kis ablak, ahol megadható a szélesség, a magasság, a boid darabszám és a szálak száma.
+Induláskor feljön egy kis ablak, ahol megadható a boid darabszám és a szálak száma.
+Benchmark indításnál ugyanitt az összevetési lépések száma is megadható.
 
 ## Benchmark
 

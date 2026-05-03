@@ -325,6 +325,32 @@ static void draw_triangle_boid(SDL_Renderer* renderer, float px, float py, Vec2 
     SDL_RenderDrawLines(renderer, pts, 4);
 }
 
+static void set_group_color(SDL_Renderer* renderer, unsigned char group, int groupCount) {
+    static const Uint8 palette[][3] = {
+        {230,  70,  70},
+        { 70, 210,  70},
+        { 70, 140, 230},
+        {230, 200,  70},
+        {210,  70, 210},
+        { 70, 210, 210},
+        {230, 120,  70},
+        {140,  70, 230},
+        {120, 230,  70},
+        {230,  70, 140},
+        { 70, 230, 120},
+        { 70, 120, 230},
+        {230, 160,  90},
+        {160, 230,  90},
+        { 90, 230, 160},
+        {160,  90, 230},
+    };
+    int idx = 0;
+
+    if (groupCount > 0) idx = (int)group % groupCount;
+    idx = idx % (int)(sizeof(palette) / sizeof(palette[0]));
+    SDL_SetRenderDrawColor(renderer, palette[idx][0], palette[idx][1], palette[idx][2], 255);
+}
+
 static void renderer_update_title(Renderer* renderer,
                                   const World* world,
                                   int threads,
@@ -427,11 +453,17 @@ static void renderer_draw_world(Renderer* renderer,
     SDL_SetRenderDrawColor(renderer->renderer, 30, 34, 42, 255);
     draw_rect_filled(renderer->renderer, offsetX, offsetY, boardW, boardH);
 
-    SDL_SetRenderDrawColor(renderer->renderer, 120, 200, 255, 255);
     for (size_t i = 0; i < world->boidCount; i++) {
         const Boid* boid = &world->boids[i];
         float px = (float)offsetX + boid->pos.x * (float)cellSize;
         float py = (float)offsetY + boid->pos.y * (float)cellSize;
+
+        if (!boid->alive) continue;
+        if (boid->predator) {
+            SDL_SetRenderDrawColor(renderer->renderer, 255, 140, 40, 255);
+        } else {
+            set_group_color(renderer->renderer, boid->group, world->groupCount);
+        }
 
         draw_triangle_boid(renderer->renderer, px, py, boid->vel, triSize);
     }

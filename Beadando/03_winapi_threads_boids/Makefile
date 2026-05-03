@@ -10,6 +10,7 @@ CPPFLAGS+=$(SDL2_CFLAGS)
 
 SRC=$(wildcard src/*.c)
 OBJ=$(SRC:.c=.o)
+HEADERS=$(wildcard src/*.h)
 BIN=boids_winapi.exe
 BENCH_BIN=boids_winapi_benchmark.exe
 
@@ -23,7 +24,7 @@ $(BIN): $(OBJ)
 $(BENCH_BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(SDL2_LDFLAGS_CONSOLE)
 
-src/%.o: src/%.c
+src/%.o: src/%.c $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 run: $(BIN)

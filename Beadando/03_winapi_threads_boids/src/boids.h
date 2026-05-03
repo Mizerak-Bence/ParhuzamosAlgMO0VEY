@@ -11,6 +11,9 @@ typedef struct Vec2 {
 typedef struct Boid {
     Vec2 pos;
     Vec2 vel;
+    unsigned char group;
+    unsigned char alive;
+    unsigned char predator;
 } Boid;
 
 typedef struct Player {
@@ -29,6 +32,7 @@ typedef struct InputState {
 typedef struct World {
     int width;
     int height;
+    int groupCount;
     size_t boidCount;
     Boid* boids;
     Boid* boidsNext;
