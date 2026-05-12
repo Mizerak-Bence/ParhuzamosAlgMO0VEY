@@ -210,83 +210,157 @@ static void world_step_range(const World* worldRead, World* worldWrite, size_t b
     const float worldH = (float)worldRead->height;
     const float eps2 = 1e-8f;
 
+    const float predMaxSpeed = 44.0f;
+    const float predMaxForce = 50.0f;
+    const float predSepRadius = 4.0f;
+    const float predSepRadius2 = predSepRadius * predSepRadius;
+    const float weightPredChase = 2.00f;
+    const float weightPredSep = 1.10f;
+    const float predAvoidRadius = 12.0f;
+    const float predAvoidRadius2 = predAvoidRadius * predAvoidRadius;
+    const float weightAvoidPred = 2.20f;
+
     for (size_t i = begin; i < end; i++) {
         Boid boid = worldRead->boids[i];
-        const unsigned char group = boid.group;
-        Vec2 sumPos = {0, 0};
-        Vec2 sumVel = {0, 0};
-        Vec2 sumSep = {0, 0};
-        int neighbors = 0;
 
         if (!boid.alive) {
             worldWrite->boidsNext[i] = boid;
             continue;
         }
 
-        for (size_t j = 0; j < worldRead->boidCount; j++) {
-            float dx;
-            float dy;
-            float d2;
+        if (boid.predator) {
+            Vec2 sumSep = {0, 0};
 
-            if (i == j) continue;
-            if (!worldRead->boids[j].alive) continue;
-            if (worldRead->boids[j].predator) continue;
-            if (worldRead->boids[j].group != group) continue;
+            for (size_t j = 0; j < worldRead->boidCount; j++) {
+                float dx;
+                float dy;
+                float d2;
 
-            dx = torus_delta(worldRead->boids[j].pos.x - boid.pos.x, worldW);
-            dy = torus_delta(worldRead->boids[j].pos.y - boid.pos.y, worldH);
-            d2 = dx * dx + dy * dy;
+                if (i == j) continue;
+                if (!worldRead->boids[j].alive) continue;
 
-            if (d2 < desiredSeparation2 && d2 > 1e-6f) {
-                Vec2 away = v_mul(v_norm((Vec2){dx, dy}), -1.0f);
-                sumSep = v_add(sumSep, v_div(away, sqrtf(d2)));
-            }
+                dx = torus_delta(worldRead->boids[j].pos.x - boid.pos.x, worldW);
+                dy = torus_delta(worldRead->boids[j].pos.y - boid.pos.y, worldH);
+                d2 = dx * dx + dy * dy;
 
-            if (d2 < neighborRadius2) {
-                neighbors++;
-                sumPos = v_add(sumPos, v_add(boid.pos, (Vec2){dx, dy}));
-                sumVel = v_add(sumVel, worldRead->boids[j].vel);
-            }
-        }
-
-        {
-            Vec2 accel = {0, 0};
-
-            if (neighbors > 0) {
-                Vec2 center = v_mul(sumPos, 1.0f / (float)neighbors);
-                Vec2 avgVel = v_mul(sumVel, 1.0f / (float)neighbors);
-                Vec2 toCenter = v_sub(center, boid.pos);
-
-                if (v_len2(toCenter) > eps2) {
-                    Vec2 desiredC = v_mul(v_norm(toCenter), maxSpeed);
-                    accel = v_add(accel, v_mul(steer_towards(desiredC, boid.vel, maxForce), weightCohesion));
+                if (d2 < predSepRadius2 && d2 > 1e-6f) {
+                    Vec2 away = v_mul(v_norm((Vec2){dx, dy}), -1.0f);
+                    sumSep = v_add(sumSep, v_div(away, sqrtf(d2)));
                 }
-                if (v_len2(avgVel) > eps2) {
-                    Vec2 desiredA = v_mul(v_norm(avgVel), maxSpeed);
-                    accel = v_add(accel, v_mul(steer_towards(desiredA, boid.vel, maxForce), weightAlignment));
-                }
-            }
-
-            if (v_len2(sumSep) > eps2) {
-                Vec2 desiredS = v_mul(v_norm(sumSep), maxSpeed);
-                accel = v_add(accel, v_mul(steer_towards(desiredS, boid.vel, maxForce), weightSeparation));
             }
 
             {
                 float pdx = torus_delta(worldRead->player.pos.x - boid.pos.x, worldW);
                 float pdy = torus_delta(worldRead->player.pos.y - boid.pos.y, worldH);
-                float playerDist2 = pdx * pdx + pdy * pdy;
-                const float playerAvoidRadius = 10.0f;
+                Vec2 toPlayer = (Vec2){pdx, pdy};
+                Vec2 accel = {0, 0};
 
-                if (playerDist2 < playerAvoidRadius * playerAvoidRadius && playerDist2 > 1e-6f) {
-                    Vec2 desiredP = v_mul(v_norm((Vec2){-pdx, -pdy}), maxSpeed);
-                    accel = v_add(accel, v_mul(steer_towards(desiredP, boid.vel, maxForce), weightAvoidPlayer));
+                if (v_len2(sumSep) > eps2) {
+                    Vec2 desiredS = v_mul(v_norm(sumSep), predMaxSpeed);
+                    Vec2 sep = steer_towards(desiredS, boid.vel, predMaxForce);
+                    accel = v_add(accel, v_mul(sep, weightPredSep));
+                }
+                if (v_len2(toPlayer) > eps2) {
+                    Vec2 desiredC = v_mul(v_norm(toPlayer), predMaxSpeed);
+                    Vec2 chase = steer_towards(desiredC, boid.vel, predMaxForce);
+                    accel = v_add(accel, v_mul(chase, weightPredChase));
+                }
+
+                boid.vel = v_add(boid.vel, v_mul(accel, (float)dt));
+                boid.vel = v_limit(boid.vel, predMaxSpeed);
+                boid.pos = wrap_pos(worldRead, v_add(boid.pos, v_mul(boid.vel, (float)dt)));
+            }
+
+            worldWrite->boidsNext[i] = boid;
+            continue;
+        }
+
+        {
+            const unsigned char group = boid.group;
+            Vec2 sumPos = {0, 0};
+            Vec2 sumVel = {0, 0};
+            Vec2 sumSep = {0, 0};
+            Vec2 sumPred = {0, 0};
+            int neighbors = 0;
+
+            for (size_t j = 0; j < worldRead->boidCount; j++) {
+                float dx;
+                float dy;
+                float d2;
+
+                if (i == j) continue;
+                if (!worldRead->boids[j].alive) continue;
+
+                dx = torus_delta(worldRead->boids[j].pos.x - boid.pos.x, worldW);
+                dy = torus_delta(worldRead->boids[j].pos.y - boid.pos.y, worldH);
+                d2 = dx * dx + dy * dy;
+
+                if (d2 < desiredSeparation2 && d2 > 1e-6f) {
+                    Vec2 away = v_mul(v_norm((Vec2){dx, dy}), -1.0f);
+                    sumSep = v_add(sumSep, v_div(away, sqrtf(d2)));
+                }
+
+                if (worldRead->boids[j].predator) {
+                    if (d2 < predAvoidRadius2 && d2 > 1e-6f) {
+                        Vec2 away = v_mul(v_norm((Vec2){dx, dy}), -1.0f);
+                        sumPred = v_add(sumPred, v_div(away, sqrtf(d2)));
+                    }
+                    continue;
+                }
+
+                if (worldRead->boids[j].group != group) continue;
+
+                if (d2 < neighborRadius2) {
+                    neighbors++;
+                    sumPos = v_add(sumPos, v_add(boid.pos, (Vec2){dx, dy}));
+                    sumVel = v_add(sumVel, worldRead->boids[j].vel);
                 }
             }
 
-            boid.vel = v_add(boid.vel, v_mul(accel, (float)dt));
-            boid.vel = v_limit(boid.vel, maxSpeed);
-            boid.pos = wrap_pos(worldRead, v_add(boid.pos, v_mul(boid.vel, (float)dt)));
+            {
+                Vec2 accel = {0, 0};
+
+                if (neighbors > 0) {
+                    Vec2 center = v_mul(sumPos, 1.0f / (float)neighbors);
+                    Vec2 avgVel = v_mul(sumVel, 1.0f / (float)neighbors);
+                    Vec2 toCenter = v_sub(center, boid.pos);
+
+                    if (v_len2(toCenter) > eps2) {
+                        Vec2 desiredC = v_mul(v_norm(toCenter), maxSpeed);
+                        accel = v_add(accel, v_mul(steer_towards(desiredC, boid.vel, maxForce), weightCohesion));
+                    }
+                    if (v_len2(avgVel) > eps2) {
+                        Vec2 desiredA = v_mul(v_norm(avgVel), maxSpeed);
+                        accel = v_add(accel, v_mul(steer_towards(desiredA, boid.vel, maxForce), weightAlignment));
+                    }
+                }
+
+                if (v_len2(sumSep) > eps2) {
+                    Vec2 desiredS = v_mul(v_norm(sumSep), maxSpeed);
+                    accel = v_add(accel, v_mul(steer_towards(desiredS, boid.vel, maxForce), weightSeparation));
+                }
+
+                if (v_len2(sumPred) > eps2) {
+                    Vec2 desiredPred = v_mul(v_norm(sumPred), maxSpeed);
+                    accel = v_add(accel, v_mul(steer_towards(desiredPred, boid.vel, maxForce), weightAvoidPred));
+                }
+
+                {
+                    float pdx = torus_delta(worldRead->player.pos.x - boid.pos.x, worldW);
+                    float pdy = torus_delta(worldRead->player.pos.y - boid.pos.y, worldH);
+                    float playerDist2 = pdx * pdx + pdy * pdy;
+                    const float playerAvoidRadius = 10.0f;
+
+                    if (playerDist2 < playerAvoidRadius * playerAvoidRadius && playerDist2 > 1e-6f) {
+                        Vec2 desiredP = v_mul(v_norm((Vec2){-pdx, -pdy}), maxSpeed);
+                        accel = v_add(accel, v_mul(steer_towards(desiredP, boid.vel, maxForce), weightAvoidPlayer));
+                    }
+                }
+
+                boid.vel = v_add(boid.vel, v_mul(accel, (float)dt));
+                boid.vel = v_limit(boid.vel, maxSpeed);
+                boid.pos = wrap_pos(worldRead, v_add(boid.pos, v_mul(boid.vel, (float)dt)));
+            }
         }
 
         worldWrite->boidsNext[i] = boid;

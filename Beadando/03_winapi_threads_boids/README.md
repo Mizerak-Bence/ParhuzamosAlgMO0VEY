@@ -1,65 +1,59 @@
-# 03 – Windows threads (WinAPI): Boids/Flocking
+# 03 – WinAPI Threads: Boids / Flocking
 
-## Cél
-A boids szimuláció párhuzamosítása WinAPI thread-ekkel (`CreateThread`, `WaitForMultipleObjects` stb.).
+Ez a projekt a 01-es boids feladat WinAPI-s szálkezelésű változata. A cél itt is ugyanaz: a 01-es játékréteg maradjon meg, csak a párhuzamos világfrissítés WinAPI worker threadekkel történjen.
 
-Az aktuális változat SDL2 ablakban jeleníti meg a boidokat, 01-szerűbb csoportos flockinggal és külön benchmark futtatható változattal.
+## Fordítás
 
-## Input
-- WASD: player mozgatása
-- Q: kilépés
-
-## Build/Run (MinGW)
-- `make`
-- `make benchmark`
-- `make run`
-
-## Copy-paste (PowerShell) – gcc build + run
-Fordítás:
 ```powershell
-cd "d:\Egyetem\2025_26_2\Párhuzamos algoritmusok\Beadando\03_winapi_threads_boids"
 .\make.cmd
 ```
 
-Futtatás:
-```powershell
-./boids_winapi.exe --threads 4 --boids 200
-```
-Kilépés: `Q` vagy az ablak bezárása.
+Ez felépíti a normál futtatót és a külön benchmark futtatót is.
 
-Induláskor feljön egy kis ablak, ahol megadható a boid darabszám és a szálak száma.
-Benchmark indításnál ugyanitt az összevetési lépések száma is megadható.
+## Futtatás
+
+Normál indítás:
+
+```powershell
+.\boids_winapi.exe
+```
+
+Induláskor feljön egy kis ablak, ahol megadható a boidok száma és a szálak száma. Ha a szálak száma 1, akkor soros futás indul, ha nagyobb, akkor WinAPI-s párhuzamos futás indul.
+
+Parancssori indítás is használható:
+
+```powershell
+.\boids_winapi.exe --mode winapi --threads 4 --boids 200 
+```
 
 ## Benchmark
 
-Kulon benchmark futtathato:
+Külön benchmark indítás:
 
 ```powershell
-.\make.cmd benchmark
 .\boids_winapi_benchmark.exe
 ```
 
 A benchmark futás menete:
 
-- indulás előtt lefut egy soros vs WinAPI összehasonlítás
-- utána elindul maga a boids szimuláció élőben
-- futás közben a konzolba kb. másodpercenként élő interval sorok íródnak
-- az ablak címsorában is látszik a seq átlag, a WinAPI átlag, a speedup és az élő ms/tick érték
-- bezáráskor készül egy `boids_winapi_benchmark_*.txt` naplófájl is
+- indulás előtt lefut egy soros vs WinAPI összehasonlítás ugyanarra a kezdő boids állapotra
+- utána elindul maga a játék élőben
+- a program futás közben a konzolba időnként kiírja a mérési adatokat
+- bezáráskor a mérési adatok egy `boids_winapi_benchmark_*.txt` fájlba is bekerülnek
 
-Parancssori benchmark továbbra is használható:
-
-```powershell
-.\boids_winapi_benchmark.exe --benchmark 500 --compare --threads 4 --boids 200 --width 80 --height 25
-```
-
-Parancssori élő benchmark session is indítható prompt nélkül:
+Parancssori benchmark példa:
 
 ```powershell
-.\boids_winapi_benchmark.exe --live-benchmark 30 --runtime 3 --threads 4 --boids 200 --width 80 --height 25
+.\boids_winapi_benchmark.exe --benchmark 500 --compare --mode winapi --threads 4 --boids 200 
 ```
 
-Itt a `--live-benchmark` az előzetes összehasonlításhoz használt tickszámot adja meg, a `--runtime` pedig másodpercben megadja, mennyi idő után lépjen ki automatikusan az élő ablak.
+## Fontos fájlok
+
+- `src/main.c`: SDL ablakkezelés, játékmódok, HUD, HP-bar, shockwave, benchmark és a WinAPI-s 01-port app-rétege
+- `src/boids.c`: a flocking szabályok és a soros világfrissítés alapja
+- `src/update_winapi.c`: a WinAPI worker thread réteg, amely a boid tömböt szeletekre bontva frissíti
+- `src/boids.h`, `src/update_winapi.h`: közös típusok és deklarációk
 
 ## Megjegyzés
-A cél, hogy a 01-es feladathoz hasonló logika legyen, csak a párhuzamosítási réteg legyen WinAPI.
+
+Ha a UI assetek nem elérhetők, a program akkor is fut: ilyenkor fallback rajzolás jelenik meg a HUD elemek helyén.
