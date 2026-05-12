@@ -47,3 +47,7 @@ A benchmark futás menete:
 - `src/boids.c`: a flocking szabályok és a világ frissítése
 - `src/update_pthreads.c`: a pthread worker szálak és a szeletelt párhuzamos számolás
 - `src/main.c`: SDL ablakkezelés, játékmódok, HUD, benchmark parancssor
+
+Assets:
+https://drive.google.com/file/d/11_eZSG3nhjnC1REgyEiaBI7g_qronA4c/view?usp=sharing
+

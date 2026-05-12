@@ -12,6 +12,9 @@
 # local doxygen config (keep local)
 01_pthreads_boids/Doxyfile
 
+# local runtime assets (keep local)
+01_pthreads_boids/assets/
+
 # generated benchmark logs (recreated locally)
 01_pthreads_boids/benchmark_session_*.txt
 01_pthreads_boids/benchmark_session_last.txt
