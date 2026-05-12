@@ -48,6 +48,7 @@ A benchmark futás menete:
 - `src/update_pthreads.c`: a pthread worker szálak és a szeletelt párhuzamos számolás
 - `src/main.c`: SDL ablakkezelés, játékmódok, HUD, benchmark parancssor
 
-Assets:
+Assets és pulsing heart Pthread-hez
+az assets a 01-es mappába, a pulsing heart azt meg mappán kívűlre kell kicsomagolni.:
 https://drive.google.com/file/d/11_eZSG3nhjnC1REgyEiaBI7g_qronA4c/view?usp=sharing
 
