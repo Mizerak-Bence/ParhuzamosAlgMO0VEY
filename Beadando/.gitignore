@@ -14,6 +14,7 @@
 
 # local runtime assets (keep local)
 01_pthreads_boids/assets/
+Pulsing Heart/
 
 # generated benchmark logs (recreated locally)
 01_pthreads_boids/benchmark_session_*.txt
